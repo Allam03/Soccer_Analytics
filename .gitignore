@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build / packaging
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE / Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Testing / coverage
+.pytest_cache/
+.hypothesis/
+.nox/
+.coverage
+coverage.xml
+.htmlcov/
+*.gcno
+*.gcda
+
+# Data / cache
+data/
+*.csv
+*.json
+*.pkl
+*.pickle
+*.parquet
+
+# Environment files
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb_checkpoints
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Secrets
+*.key
+*.pem
+*.p12
+*.crt
+
+# Temp
+tmp/
+temp/
+*.tmp
+*.bak
