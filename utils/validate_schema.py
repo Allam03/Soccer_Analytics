@@ -1,165 +1,195 @@
-# Soccer_Analytics/utils/validate_schema.py
+"""
+utils/validate_schema.py
+
+Validate that the live PostgreSQL schema matches the expected DDL.
+"""
+
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
-from load.postgres import connect
+logger = logging.getLogger("schema")
+logger.setLevel(logging.WARNING)
 
-logging.getLogger('schema').setLevel(logging.WARNING)
+# PostgreSQL reports TEXT columns as 'text', not 'varchar'.
+# FLOAT columns are reported as 'double precision'.
+# INT columns are 'integer'.
+_TYPE_ALIASES = {
+    "varchar":          "text",
+    "character varying":"text",
+    "int4":             "integer",
+    "int8":             "bigint",
+    "float4":           "real",
+    "float8":           "double precision",
+    "numeric":          "double precision",  # treat as compatible
+    "bool":             "boolean",
+}
+
+
+def _normalise_type(t: str) -> str:
+    return _TYPE_ALIASES.get(t.lower(), t.lower())
 
 
 def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
     """
-    Validate that the database schema matches expectations.
-    
-    Returns:
-        (success: bool, warnings: List[str], errors: List[str])
+    Validate that all expected tables and columns exist with compatible types.
+
+    Returns
+    -------
+    (success, warnings, errors)
     """
-    warnings = []
-    errors = []
-    
+    warnings: List[str] = []
+    errors:   List[str] = []
+
+    expected = {
+        "teams": {
+            "team_id":           "integer",
+            "team_name":         "text",
+            "statsbomb_team_id": "integer",
+        },
+        "players": {
+            "player_id":               "integer",
+            "player_name":             "text",
+            "norm_name":               "text",
+            "statsbomb_player_id":     "integer",
+            "transfermarkt_player_id": "text",
+            "date_of_birth":           "date",
+        },
+        "matches": {
+            "match_id":           "integer",
+            "statsbomb_match_id": "integer",
+            "match_date":         "date",
+            "home_team_id":       "integer",
+            "away_team_id":       "integer",
+            "home_score":         "integer",
+            "away_score":         "integer",
+            "competition":        "text",
+            "season":             "text",
+            "stadium_name":       "text",
+            "stadium_lat":        "double precision",
+            "stadium_lng":        "double precision",
+        },
+        "weather": {
+            "weather_id":      "integer",
+            "match_id":        "integer",
+            "temperature_c":   "double precision",
+            "humidity_pct":    "double precision",
+            "wind_speed_kmh":  "double precision",
+            "precipitation_mm":"double precision",
+        },
+        "injuries": {
+            "injury_id":    "integer",
+            "player_id":    "integer",
+            "injury_date":  "date",
+            "return_date":  "date",
+        },
+        "player_match_stats": {
+            "stat_id":              "integer",
+            "player_id":            "integer",
+            "match_id":             "integer",
+            "team_id":              "integer",
+            "weather_id":           "integer",
+            "goals":                "integer",
+            "assists":              "integer",
+            "shots":                "integer",
+            "xg":                   "double precision",
+            "xa":                   "double precision",
+            "key_passes":           "integer",
+            "passes_attempted":     "integer",
+            "passes_completed":     "integer",
+            "pass_accuracy":        "double precision",
+            "progressive_passes":   "integer",
+            "carry_distance":       "double precision",
+            "progressive_carries":  "integer",
+            "dribbles_completed":   "integer",
+            "tackles":              "integer",
+            "interceptions":        "integer",
+            "clearances":           "integer",
+            "pressures":            "integer",
+            "yellow_cards":         "integer",
+            "red_cards":            "integer",
+            "minutes_played":       "integer",
+            "sub_minute":           "integer",
+            "days_since_last_injury":"integer",
+            "matches_last_30_days": "integer",
+            "minutes_last_30_days": "integer",
+            "is_injured_next_30d":  "boolean",
+        },
+        "pass_network_edges": {
+            "edge_id":    "integer",
+            "match_id":   "integer",
+            "team_id":    "integer",
+            "passer_id":  "integer",
+            "receiver_id":"integer",
+            "pass_count": "integer",
+            "avg_x_start":"double precision",
+            "avg_y_start":"double precision",
+            "avg_x_end":  "double precision",
+            "avg_y_end":  "double precision",
+        },
+    }
+
     try:
         with conn.cursor() as cur:
-            # Check teams table
+            for table, cols in expected.items():
+                cur.execute("""
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name   = %s
+                """, (table,))
+                existing = {row[0]: _normalise_type(row[1]) for row in cur.fetchall()}
+
+                if not existing:
+                    errors.append(f"Table '{table}' does not exist")
+                    continue
+
+                for col, exp_type in cols.items():
+                    if col not in existing:
+                        errors.append(f"{table}.{col} is missing")
+                    elif existing[col] != _normalise_type(exp_type):
+                        warnings.append(
+                            f"{table}.{col}: expected {exp_type}, "
+                            f"got {existing[col]}"
+                        )
+
+            # Check for required unique constraint on player_match_stats
             cur.execute("""
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = 'teams'
-                ORDER BY ordinal_position
+                SELECT COUNT(*) FROM information_schema.table_constraints
+                WHERE table_name = 'player_match_stats'
+                  AND constraint_type = 'UNIQUE'
             """)
-            
-            expected_teams_cols = {
-                'team_id': ('int4', False),
-                'team_name': ('varchar', True),
-                'statsbomb_team_id': ('int4', False),
-            }
-            
-            existing_teams_cols = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-            
-            for col_name, (expected_type, is_nullable) in expected_teams_cols.items():
-                if col_name not in existing_teams_cols:
-                    errors.append(f"teams table missing required column: {col_name}")
-                else:
-                    actual_type, is_nullable_actual = existing_teams_cols[col_name]
-                    if actual_type.upper() != expected_type.upper():
-                        warnings.append(f"teams.{col_name} has type {actual_type}, expected {expected_type}")
-            
-            # Check players table
-            cur.execute("""
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = 'players'
-                ORDER BY ordinal_position
-            """)
-            
-            expected_players_cols = {
-                'player_id': ('int4', False),
-                'player_name': ('varchar', True),
-                'norm_name': ('varchar', True),
-                'statsbomb_player_id': ('int4', True),
-            }
-            
-            existing_players_cols = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-            
-            for col_name, (expected_type, is_nullable) in expected_players_cols.items():
-                if col_name not in existing_players_cols:
-                    errors.append(f"players table missing required column: {col_name}")
-                else:
-                    actual_type, is_nullable_actual = existing_players_cols[col_name]
-                    if actual_type.upper() != expected_type.upper():
-                        warnings.append(f"players.{col_name} has type {actual_type}, expected {expected_type}")
-            
-            # Check player_match_stats table
-            cur.execute("""
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = 'player_match_stats'
-                ORDER BY ordinal_position
-            """)
-            
-            expected_stats_cols = {
-                'player_id': ('int4', False),
-                'match_id': ('int4', False),
-                'team_id': ('int4', True),
-                'goals': ('int4', True),
-                'assists': ('int4', True),
-                'shots': ('int4', True),
-                'xg': ('numeric', True),
-                'xa': ('numeric', True),
-                'passes_attempted': ('int4', True),
-                'passes_completed': ('int4', True),
-                'pass_accuracy': ('numeric', True),
-            }
-            
-            existing_stats_cols = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
-            
-            for col_name, (expected_type, is_nullable) in expected_stats_cols.items():
-                if col_name not in existing_stats_cols:
-                    errors.append(f"player_match_stats table missing required column: {col_name}")
-                else:
-                    actual_type, is_nullable_actual = existing_stats_cols[col_name]
-                    if actual_type.upper() != expected_type.upper():
-                        warnings.append(f"player_match_stats.{col_name} has type {actual_type}, expected {expected_type}")
-            
-            # Check indexes
-            cur.execute("""
-                SELECT indexname, indexdef
-                FROM pg_indexes
-                WHERE schemaname = 'public'
-                AND (indexdef LIKE '%player_match_stats%' OR indexdef LIKE '%teams%' OR indexdef LIKE '%players%')
-            """)
-            
-            existing_indexes = {row[0]: row[1] for row in cur.fetchall()}
-            
-            required_indexes = [
-                ('player_match_stats_player_id_match_id_team_id_idx', 
-                 'CREATE INDEX player_match_stats_player_id_match_id_team_id_idx ON player_match_stats (player_id, match_id, team_id)'),
-                ('teams_statsbomb_team_id_idx', 'CREATE INDEX teams_statsbomb_team_id_idx ON teams (statsbomb_team_id)'),
-                ('players_statsbomb_player_id_idx', 'CREATE INDEX players_statsbomb_player_id_idx ON players (statsbomb_player_id)'),
-                ('players_norm_name_idx', 'CREATE INDEX players_norm_name_idx ON players (norm_name)'),
-            ]
-            
-            for idx_name, idx_def in required_indexes:
-                if idx_name not in existing_indexes:
-                    errors.append(f"Missing required index: {idx_name}")
-                    warnings.append(f"  {idx_def}")
-            
-            # Check for orphaned records
-            cur.execute("""
-                SELECT COUNT(*) as count
-                FROM player_match_stats pms
-                LEFT JOIN teams t ON pms.team_id = t.team_id
-                WHERE t.team_id IS NULL
-            """)
-            
-            orphaned_teams = cur.fetchone()[0]
-            if orphaned_teams > 0:
-                warnings.append(f"Found {orphaned_teams} player_match_stats records with non-existent teams")
-            
-            cur.execute("""
-                SELECT COUNT(*) as count
-                FROM player_match_stats pms
-                LEFT JOIN players p ON pms.player_id = p.player_id
-                WHERE p.player_id IS NULL
-            """)
-            
-            orphaned_players = cur.fetchone()[0]
-            if orphaned_players > 0:
-                warnings.append(f"Found {orphaned_players} player_match_stats records with non-existent players")
-            
-            conn.commit()
-            
-            success = len(errors) == 0
-            logging.warning(f"Schema validation: {'PASSED' if success else 'FAILED'}")
-            for warning in warnings:
-                logging.warning(f"  Warning: {warning}")
-            for error in errors:
-                logging.error(f"  Error: {error}")
-            
-            return success, warnings, errors
-            
-    except Exception as e:
-        logging.error(f"Schema validation failed with exception: {e}")
-        return False, [], [str(e)]
+            if cur.fetchone()[0] == 0:
+                errors.append("player_match_stats missing UNIQUE constraint")
+
+            # Orphan checks
+            for fk_table, fk_col, ref_table, ref_col in [
+                ("player_match_stats", "player_id", "players",  "player_id"),
+                ("player_match_stats", "match_id",  "matches",  "match_id"),
+                ("player_match_stats", "team_id",   "teams",    "team_id"),
+                ("injuries",           "player_id", "players",  "player_id"),
+            ]:
+                cur.execute(f"""
+                    SELECT COUNT(*) FROM {fk_table} f
+                    LEFT JOIN {ref_table} r ON r.{ref_col} = f.{fk_col}
+                    WHERE f.{fk_col} IS NOT NULL AND r.{ref_col} IS NULL
+                """)
+                orphans = cur.fetchone()[0]
+                if orphans:
+                    warnings.append(
+                        f"{fk_table}.{fk_col}: {orphans} orphaned rows "
+                        f"(no matching {ref_table}.{ref_col})"
+                    )
+
+        success = len(errors) == 0
+        level   = logging.WARNING if not success else logging.INFO
+        logger.log(level, "Schema validation: %s", "PASSED" if success else "FAILED")
+        for w in warnings:
+            logger.warning("  Warning: %s", w)
+        for e in errors:
+            logger.error("  Error: %s", e)
+
+        return success, warnings, errors
+
+    except Exception as exc:
+        logger.error("Schema validation raised an exception: %s", exc)
+        return False, [], [str(exc)]

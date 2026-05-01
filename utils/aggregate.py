@@ -1,296 +1,226 @@
-# Soccer_Analytics/utils/aggregate.py
+"""
+utils/aggregate.py
+
+Higher-level aggregation utilities built on top of transform/features.py.
+Uses the correct StatsBomb nested-dict schema throughout.
+
+Key difference from transform/features.py
+------------------------------------------
+transform/features.agg_player_events() -- per-player, per-match aggregation
+utils/aggregate functions               -- match-level and batch-level helpers
+                                           used by downstream ML feature extraction
+"""
+
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Tuple
+
 import pandas as pd
-import numpy as np
 
-logging.getLogger('aggregate').setLevel(logging.DEBUG)
+from transform.features import agg_player_events
+from transform.schema import event_type as get_event_type
+
+logger = logging.getLogger("aggregate")
+logger.setLevel(logging.DEBUG)
 
 
-def aggregate_player_events(events: pd.DataFrame, 
-                           player_id: int,
-                           event_type: str = 'all') -> Dict[str, Any]:
+def _get_player_id(ev) -> int | None:
+    """Extract StatsBomb player id from an event row."""
+    p = ev.get("player")
+    return p.get("id") if isinstance(p, dict) else None
+
+
+def _get_team_id(ev) -> int | None:
+    """Extract StatsBomb team id from an event row."""
+    t = ev.get("team")
+    return t.get("id") if isinstance(t, dict) else None
+
+
+def aggregate_player_events(
+    events: pd.DataFrame,
+    player_id: int,
+    event_type_filter: str = "all",
+) -> Dict[str, Any]:
     """
     Aggregate all events for a single player across a match.
-    
-    Args:
-        events: DataFrame containing all events for the match
-        player_id: The player ID to aggregate
-        event_type: 'all', 'attack', 'defence', 'setpiece', etc.
-    
-    Returns:
-        Dictionary of aggregated stats for the player
+
+    Parameters
+    ----------
+    events          : DataFrame of all events for the match.
+    player_id       : StatsBomb player id (integer).
+    event_type_filter : 'all' | 'attack' | 'defence' | 'setpiece'
+                        Filters events to a subset before aggregation.
+                        Note: filtering happens AFTER extracting the player
+                        subset so that minutes_played is always correct.
+
+    Returns
+    -------
+    dict of aggregated stats matching player_match_stats columns.
     """
-    # Filter events for this player
-    player_events = events[events['player_id'] == player_id]
-    
+    # First pass: get all events for this player (for time/minutes)
+    player_events = events[events["player"].apply(
+        lambda x: isinstance(x, dict) and x.get("id") == player_id
+    )]
+
     if player_events.empty:
-        # Return empty stats with defaults
-        return {
-            'goals': 0,
-            'assists': 0,
-            'shots': 0,
-            'xg': 0.0,
-            'xa': 0.0,
-            'passes_attempted': 0,
-            'passes_completed': 0,
-            'pass_accuracy': 0.0,
-            'key_passes': 0,
-            'shots_on_target': 0,
-            'tackles': 0,
-            'interceptions': 0,
-            'clearances': 0,
-            'yellow_cards': 0,
-            'red_cards': 0,
-            'minutes_played': 0,
-            'positions': []
+        return _empty_stats()
+
+    # Apply optional event-type filter to a copy for counting purposes
+    # but keep full player_events for the canonical aggregation below
+    if event_type_filter != "all":
+        _FILTER_MAP = {
+            "attack":   {"Shot", "Dribble", "Carry"},
+            "defence":  {"Duel", "Interception", "Clearance", "Pressure", "Block"},
+            "setpiece": {"Pass", "Free Kick", "Corner Received"},
         }
-    
-    # Aggregate basic stats
-    stats = {
-        'goals': player_events['player_id'].count() if 'goals' in player_events.columns else 0,
-        'assists': 0,
-        'shots': 0,
-        'xg': 0.0,
-        'xa': 0.0,
-        'passes_attempted': 0,
-        'passes_completed': 0,
-        'pass_accuracy': 0.0,
-        'key_passes': 0,
-        'shots_on_target': 0,
-        'tackles': 0,
-        'interceptions': 0,
-        'clearances': 0,
-        'yellow_cards': 0,
-        'red_cards': 0,
-        'minutes_played': 0,
-        'positions': []
-    }
-    
-    # Event type based aggregation
-    if event_type == 'attack':
-        attack_types = ['shot', 'goal', 'penalty_miss', 'penalty_saved', 'assisted_goal',
-                       'key_pass', 'shot_on_target']
-        player_events = player_events[
-            player_events['event_type_name'].apply(
-                lambda x: x in attack_types if isinstance(x, str) else False
-            )
-        ]
-        
-    elif event_type == 'defence':
-        defence_types = ['tackle', 'interception', 'clearance', 'header_clearance',
-                        'block', 'fouls', 'offsides']
-        player_events = player_events[
-            player_events['event_type_name'].apply(
-                lambda x: x in defence_types if isinstance(x, str) else False
-            )
-        ]
-    
-    elif event_type == 'setpiece':
-        setpiece_types = ['freekick', 'corner', 'throw_in', 'goal_kick', 'penalty']
-        player_events = player_events[
-            player_events['event_type_name'].apply(
-                lambda x: x in setpiece_types if isinstance(x, str) else False
-            )
-        ]
-    
-    elif event_type == 'all':
-        pass # Use all events
-    
-    # Count events for this player
-    stats['events_count'] = len(player_events)
-    
-    # Aggregate specific metrics
-    if not player_events.empty:
-        stats['events_count'] = len(player_events)
-        
-        # Goals (event_type_name == 'goal' with outcome == 'on')
-        goals = player_events[
-            (player_events['event_type_name'] == 'goal') & 
-            (player_events.get('outcome', '').astype(str).str.contains('on', na=False))
-        ]
-        stats['goals'] = len(goals)
-        
-        # Assists
-        assists = player_events[
-            (player_events['event_type_name'] == 'assisted_goal')
-        ]
-        stats['assists'] = len(assists)
-        
-        # Shots
-        shots = player_events[
-            (player_events['event_type_name'] == 'shot')
-        ]
-        stats['shots'] = len(shots)
-        
-        # Expected Goals
-        if 'expected_goal_value' in player_events.columns:
-            stats['xg'] = player_events['expected_goal_value'].sum()
-        
-        # Expected Assists
-        if 'expected_assist_value' in player_events.columns:
-            stats['xa'] = player_events['expected_assist_value'].sum()
-        
-        # Passes
-        pass_events = player_events[
-            player_events['event_type_name'].isin(['pass', 'accurate_pass', 'inaccurate_pass'])
-        ]
-        if not pass_events.empty:
-            stats['passes_attempted'] = pass_events['player_id'].nunique() # Approximation for now
-            stats['passes_completed'] = len(pass_events[pass_events.get('accurate', False)])
-            if stats['passes_attempted'] > 0:
-                stats['pass_accuracy'] = stats['passes_completed'] / stats['passes_attempted']
-        
-        # Defensive stats
-        tackle_events = player_events[
-            player_events['event_type_name'] == 'tackle'
-        ]
-        stats['tackles'] = len(tackle_events)
-        
-        intercept_events = player_events[
-            player_events['event_type_name'] == 'interception'
-        ]
-        stats['interceptions'] = len(intercept_events)
-        
-        clearance_events = player_events[
-            player_events['event_type_name'] == 'clearance'
-        ]
-        stats['clearances'] = len(clearance_events)
-        
-        # Cards
-        yellow_events = player_events[
-            (player_events['event_type_name'] == 'foul') & 
-            (player_events.get('outcome', '').astype(str).str.contains('yellow', na=False))
-        ]
-        stats['yellow_cards'] = len(yellow_events)
-        
-        red_events = player_events[
-            (player_events['event_type_name'] == 'foul') & 
-            (player_events.get('outcome', '').astype(str).str.contains('red', na=False))
-        ]
-        stats['red_cards'] = len(red_events)
-        
-        # Minutes played (approximate based on last event time)
-        if not player_events.empty:
-            first_time = min(player_events['timestamp'].min(), default=0)
-            last_time = max(player_events['timestamp'].max(), default=0)
-            # Note: This is a rough approximation. Ideally, use player minute data.
-            stats['minutes_played'] = max(0, int((last_time - first_time).total_seconds() / 60))
-        
-        return stats
-    return {}
+        keep = _FILTER_MAP.get(event_type_filter, set())
+        player_events = player_events[player_events["type"].apply(
+            lambda t: (isinstance(t, dict) and t.get("name") in keep)
+        )]
+
+    # Delegate to the canonical aggregation function
+    return agg_player_events(player_events, player_id, get_event_type)
 
 
 def aggregate_match_stats(events: pd.DataFrame, match_id: int) -> Dict[str, Any]:
     """
-    Aggregate all stats for a single match.
-    
-    Args:
-        events: DataFrame of all events for a match
-        match_id: The match ID
-    
-    Returns:
-        Dictionary containing match-level aggregated stats
+    Compute match-level summary stats from a DataFrame of events.
+
+    Parameters
+    ----------
+    events   : DataFrame of all events for the match.
+    match_id : Internal (PostgreSQL) match id -- stored in the result dict.
+
+    Returns
+    -------
+    dict with match-level aggregated stats.
     """
-    match_events = events[events['match_id'] == match_id]
-    
-    if match_events.empty:
-        return {
-            'match_id': match_id,
-            'home_team': None,
-            'away_team': None,
-            'home_score': None,
-            'away_score': None,
-            'total_events': 0,
-            'home_goals': 0,
-            'away_goals': 0,
-            'possession_home': 0,
-            'possession_away': 0
-        }
-    
-    # Basic counts
-    total_events = len(match_events)
-    home_goals = len(match_events[
-        (match_events['event_type_name'] == 'goal') & 
-        (match_events.get('outcome', '').astype(str).str.contains('home', na=False))
-    ])
-    away_goals = len(match_events[
-        (match_events['event_type_name'] == 'goal') & 
-        (match_events.get('outcome', '').astype(str).str.contains('away', na=False))
-    ])
-    
+    if events.empty:
+        return _empty_match_stats(match_id)
+
+    home_goals = away_goals = 0
+    home_xg    = away_xg    = 0.0
+
+    # Identify home and away teams from Starting XI events
+    home_team_id = away_team_id = None
+    starting_xi = events[events["type"].apply(
+        lambda t: isinstance(t, dict) and t.get("name") == "Starting XI"
+    )]
+    team_ids = [_get_team_id(r) for _, r in starting_xi.iterrows() if _get_team_id(r)]
+    if len(team_ids) >= 2:
+        home_team_id, away_team_id = team_ids[0], team_ids[1]
+
+    # Shot events
+    shot_events = events[events["type"].apply(
+        lambda t: isinstance(t, dict) and t.get("name") == "Shot"
+    )]
+    for _, ev in shot_events.iterrows():
+        shot = ev.get("shot") or {}
+        xg   = shot.get("statsbomb_xg") or 0.0
+        outcome = shot.get("outcome")
+        if isinstance(outcome, dict):
+            outcome = outcome.get("name", "")
+        team = _get_team_id(ev)
+
+        if team == home_team_id:
+            home_xg += xg
+            if outcome == "Goal":
+                home_goals += 1
+        elif team == away_team_id:
+            away_xg += xg
+            if outcome == "Goal":
+                away_goals += 1
+
     return {
-        'match_id': match_id,
-        'home_team': None, # Would need team data join
-        'away_team': None,
-        'home_score': home_goals,
-        'away_score': away_goals,
-        'total_events': total_events,
-        'home_goals': home_goals,
-        'away_goals': away_goals,
-        'possession_home': 0, # Would need matchbox data join
-        'possession_away': 0
+        "match_id":    match_id,
+        "home_team_id": home_team_id,
+        "away_team_id": away_team_id,
+        "home_goals":   home_goals,
+        "away_goals":   away_goals,
+        "home_xg":      round(home_xg, 4),
+        "away_xg":      round(away_xg, 4),
+        "total_events": len(events),
     }
 
 
-def process_batch(events_df: pd.DataFrame) -> List[Dict[str, Any]]:
+def process_batch(
+    events_df: pd.DataFrame,
+) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
     """
-    Process a large batch of events.
-    
-    Args:
-        events_df: Pandas DataFrame of Statsbomb events
-    
-    Returns:
-        List of aggregated player stats
+    Process a DataFrame that spans multiple matches.
+
+    Parameters
+    ----------
+    events_df : DataFrame with a 'match_id' column (internal pg id) plus
+                all standard StatsBomb event columns.
+
+    Returns
+    -------
+    (player_stats, match_stats)
+      player_stats : list of per-player stat dicts, each including match_id
+      match_stats  : dict of match_id -> match-level aggregation dict
     """
-    player_stats = []
-    match_stats = {}
-    
-    # Group by match for efficiency
-    matches = events_df.groupby('match_id')
-    
-    for match_id, match_events in matches:
-        # Validate batch first (optional, expensive for large batches)
-        # validate_batch(match_events)
-        
+    player_stats: List[Dict[str, Any]] = []
+    match_stats:  Dict[int, Dict[str, Any]] = {}
+
+    if "match_id" not in events_df.columns:
+        logger.error("process_batch: events_df missing 'match_id' column")
+        return player_stats, match_stats
+
+    for match_id, match_events in events_df.groupby("match_id"):
         match_agg = aggregate_match_stats(match_events, match_id)
         match_stats[match_id] = match_agg
-        
-        # Process each player in the match
-        unique_players = match_events['player_id'].unique()
-        
-        for player_id in unique_players:
-            player_events = match_events[match_events['player_id'] == player_id]
+
+        unique_players = set()
+        for _, ev in match_events.iterrows():
+            pid = _get_player_id(ev)
+            if pid:
+                unique_players.add(pid)
+
+        for pid in unique_players:
             try:
-                player_stat = aggregate_player_events(player_events, player_id)
-                player_stat['match_id'] = match_id
-                player_stat['player_id'] = player_id
-                player_stats.append(player_stat)
-            except Exception as e:
-                logging.error(f"Error processing player {player_id} in match {match_id}: {e}")
-                # Create empty stat for this player to ensure they have a record
-                empty_stat = {
-                    'match_id': match_id,
-                    'player_id': player_id,
-                    'goals': 0,
-                    'assists': 0,
-                    'shots': 0,
-                    'xg': 0.0,
-                    'xa': 0.0,
-                    'passes_attempted': 0,
-                    'passes_completed': 0,
-                    'pass_accuracy': 0.0,
-                    'tackles': 0,
-                    'interceptions': 0,
-                    'clearances': 0,
-                    'yellow_cards': 0,
-                    'red_cards': 0,
-                    'minutes_played': 0,
-                    'positions': []
-                }
-                player_stats.append(empty_stat)
-    
+                stat = aggregate_player_events(match_events, pid)
+                stat["match_id"]  = match_id
+                stat["player_id"] = pid
+                player_stats.append(stat)
+            except Exception as exc:
+                logger.error(
+                    "Error processing player %d in match %d: %s", pid, match_id, exc
+                )
+                empty = _empty_stats()
+                empty["match_id"]  = match_id
+                empty["player_id"] = pid
+                player_stats.append(empty)
+
     return player_stats, match_stats
 
 
-__all__ = ['aggregate_player_events', 'aggregate_match_stats', 'process_batch']
+def _empty_stats() -> Dict[str, Any]:
+    return {
+        "goals": 0, "assists": 0, "shots": 0,
+        "xg": 0.0, "xa": 0.0,
+        "key_passes": 0,
+        "passes_attempted": 0, "passes_completed": 0, "pass_accuracy": 0.0,
+        "progressive_passes": 0,
+        "carry_distance": 0.0, "progressive_carries": 0,
+        "dribbles_completed": 0,
+        "tackles": 0, "interceptions": 0, "clearances": 0, "pressures": 0,
+        "yellow_cards": 0, "red_cards": 0,
+        "minutes_played": 0, "sub_minute": None,
+    }
+
+
+def _empty_match_stats(match_id: int) -> Dict[str, Any]:
+    return {
+        "match_id": match_id,
+        "home_team_id": None, "away_team_id": None,
+        "home_goals": 0, "away_goals": 0,
+        "home_xg": 0.0, "away_xg": 0.0,
+        "total_events": 0,
+    }
+
+
+__all__ = [
+    "aggregate_player_events",
+    "aggregate_match_stats",
+    "process_batch",
+]
