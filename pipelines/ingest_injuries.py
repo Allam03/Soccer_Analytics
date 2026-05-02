@@ -3,28 +3,26 @@ pipelines/ingest_injuries.py
 
 Load Transfermarkt data from two CSVs into the database.
 
-Pass 1 -- transfermarkt_players.csv
-    For every Transfermarkt player, try to match them to a row in the
-    players table (via norm_name fuzzy match).  When a match is found:
-      - Write players.transfermarkt_player_id
-      - Write players.date_of_birth
-      - Write players.nationality  (country_of_citizenship) if blank
-      - Write players.position     if blank
+Column name fix
+---------------
+The Kaggle transfermarkt_players.csv uses 'player_id' as its id column,
+NOT 'transfermarkt_player_id'.  _detect_tm_id_col() detects the actual
+column name at load time and renames it to 'transfermarkt_player_id' so
+all downstream code uses one consistent name.
 
-Pass 2 -- transfermarkt_injuries.csv
-    For every injury row, look up the internal player_id using
-    transfermarkt_player_id (now populated by Pass 1 -- no name matching
-    needed at this stage).  Insert into the injuries table.
+Without this fix:
+  row.get("transfermarkt_player_id") returns None for every row
+  -> tm_id is always None
+  -> nothing added to tm_id_map
+  -> Pass 2 sees an empty map and inserts 0 injuries
 
-Matching strategy for Pass 1
------------------------------
-Priority 1: players.transfermarkt_player_id already set and matches.
-Priority 2: norm_name(full_name) matches players.norm_name.
-Priority 3: norm_name(first_name + ' ' + last_name) matches players.norm_name.
-
-The players CSV uses `transfermarkt_player_id` as its primary key, which is
-the same ID that appears as `player_id` in the injuries CSV -- so after
-Pass 1 the injuries join is a simple integer lookup with no name matching.
+Matching strategy (priority order)
+------------------------------------
+1. transfermarkt_player_id already set in DB (reruns)
+2. norm_name(first + last)          e.g. "lionel messi"
+3. norm_name(full_name)
+4. norm_name(first_initial + last)  e.g. "l messi"
+5. last name only, unambiguous      (exactly 1 SB player with that surname)
 """
 
 import logging
@@ -43,60 +41,117 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_sb_player_map(conn) -> tuple[dict, dict]:
-    """
-    Load the current state of the players table.
+def _to_tm_id(raw) -> str | None:
+    """Safely convert a raw CSV player id value to a clean string integer."""
+    if not pd.notna(raw):
+        return None
+    try:
+        return str(int(float(raw)))
+    except (ValueError, TypeError):
+        return None
 
+
+def _detect_tm_id_col(df: pd.DataFrame) -> str | None:
+    """
+    Return the column that holds the Transfermarkt integer player id.
+
+    The Kaggle players CSV calls this column 'player_id', not
+    'transfermarkt_player_id'.  We try several candidate names in order.
+    """
+    for candidate in ("transfermarkt_player_id", "player_id", "tm_player_id", "id"):
+        if candidate in df.columns:
+            logger.info("  TM id column detected as '%s'", candidate)
+            return candidate
+    logger.error(
+        "  Cannot find TM player id column. Columns present: %s", list(df.columns)
+    )
+    return None
+
+
+def _load_sb_player_map(conn) -> tuple[dict, dict, dict]:
+    """
     Returns
     -------
-    tm_id_map : {transfermarkt_player_id (str) -> internal player_id}
-    norm_map  : {norm_name (str)               -> internal player_id}
+    tm_id_map   : {str(transfermarkt_player_id) -> internal player_id}
+    norm_map    : {norm_name                    -> internal player_id}
+    last_nm_map : {last token of norm_name      -> [internal player_id]}
     """
-    tm_id_map: dict[str, int] = {}
-    norm_map:  dict[str, int] = {}
+    tm_id_map:   dict[str, int]       = {}
+    norm_map:    dict[str, int]       = {}
+    last_nm_map: dict[str, list[int]] = {}
+
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT player_id, transfermarkt_player_id, norm_name
-            FROM players
-        """)
+        cur.execute(
+            "SELECT player_id, transfermarkt_player_id, norm_name FROM players"
+        )
         for pid, tmid, nn in cur.fetchall():
             if tmid:
                 tm_id_map[str(tmid)] = pid
             if nn:
                 norm_map[nn] = pid
-    return tm_id_map, norm_map
+                last = nn.split()[-1] if nn.split() else ""
+                if last:
+                    last_nm_map.setdefault(last, []).append(pid)
+
+    logger.info(
+        "  DB map: %d with TM id, %d norm entries, %d surname entries",
+        len(tm_id_map), len(norm_map), len(last_nm_map),
+    )
+    return tm_id_map, norm_map, last_nm_map
 
 
-def _resolve_tm_player(row: pd.Series, tm_id_map: dict, norm_map: dict) -> int | None:
+def _candidate_norms(row: pd.Series) -> list[str]:
     """
-    Try to find the internal player_id for a transfermarkt_players row.
-
-    Tries (in order):
-      1. transfermarkt_player_id already linked in DB
-      2. norm_name(full_name)
-      3. norm_name(first_name + last_name)
+    Return normalised name strings to try, most-specific first,
+    deduplicated while preserving order.
     """
-    raw = row.get("transfermarkt_player_id")
-    tm_id = str(int(raw)) if pd.notna(raw) else ""
-    if tm_id and tm_id in tm_id_map:
-        return tm_id_map[tm_id]
-
-    # Try full_name
-    full = str(row.get("full_name") or "").strip()
-    if full:
-        nn = norm_name(full)
-        if nn in norm_map:
-            return norm_map[nn]
-
-    # Try first + last
     first = str(row.get("first_name") or "").strip()
     last  = str(row.get("last_name")  or "").strip()
-    if first or last:
-        nn = norm_name(f"{first} {last}")
-        if nn in norm_map:
-            return norm_map[nn]
+    full  = str(row.get("full_name")  or "").strip()
 
-    return None
+    raw = [
+        f"{first} {last}" if (first and last) else "",
+        full,
+        f"{first[0]} {last}" if (first and last) else "",
+        last,
+        full.strip().split()[-1] if full else "",
+    ]
+
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for s in raw:
+        nn = norm_name(s)
+        if nn and nn not in seen_set:
+            seen.append(nn)
+            seen_set.add(nn)
+    return seen
+
+
+def _resolve_tm_player(
+    row: pd.Series,
+    tm_id_map: dict,
+    norm_map: dict,
+    last_nm_map: dict,
+) -> tuple[int | None, str]:
+    """Return (internal_player_id, match_method) or (None, 'no_match')."""
+    # Priority 1: TM ID already in DB
+    tm_id = _to_tm_id(row.get("transfermarkt_player_id"))
+    if tm_id and tm_id in tm_id_map:
+        return tm_id_map[tm_id], "tm_id"
+
+    # Priority 2-4: normalised name candidates
+    for nn in _candidate_norms(row):
+        if nn in norm_map:
+            return norm_map[nn], f"norm:{nn}"
+
+    # Priority 5: unambiguous surname match
+    last = str(row.get("last_name") or "").strip()
+    if last:
+        matches = last_nm_map.get(norm_name(last), [])
+        if len(matches) == 1:
+            return matches[0], f"surname_only:{norm_name(last)}"
+
+    return None, "no_match"
 
 
 # ---------------------------------------------------------------------------
@@ -105,89 +160,113 @@ def _resolve_tm_player(row: pd.Series, tm_id_map: dict, norm_map: dict) -> int |
 
 def ingest_players(conn, players_csv: str) -> dict[str, int]:
     """
-    Match Transfermarkt players to the StatsBomb players table and back-fill
-    transfermarkt_player_id, date_of_birth, nationality, and position.
+    Match TM players to the StatsBomb players table and backfill
+    transfermarkt_player_id, date_of_birth, nationality, position.
 
-    Returns
-    -------
-    tm_id_map : {transfermarkt_player_id (str) -> internal player_id}
-                The complete map after updates, used by Pass 2.
+    Returns tm_id_map {str(tm_id) -> internal player_id} for Pass 2.
     """
-    logger.info("Pass 1: loading Transfermarkt players from: %s", players_csv)
+    logger.info("Pass 1: loading %s", players_csv)
     df = pd.read_csv(players_csv, low_memory=False)
-    logger.info("  %d rows in players CSV", len(df))
-
-    # Normalise column names to lowercase-underscore
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    logger.info("  %d rows | columns: %s", len(df), list(df.columns))
 
-    # Parse date_of_birth; keep as Python date
+    # Detect and standardise the TM id column name
+    tm_id_col = _detect_tm_id_col(df)
+    if tm_id_col is None:
+        return {}
+    if tm_id_col != "transfermarkt_player_id":
+        df = df.rename(columns={tm_id_col: "transfermarkt_player_id"})
+
     if "date_of_birth" in df.columns:
-        df["date_of_birth"] = pd.to_datetime(df["date_of_birth"], errors="coerce").dt.date
+        df["date_of_birth"] = pd.to_datetime(
+            df["date_of_birth"], errors="coerce"
+        ).dt.date
 
-    tm_id_map, norm_map = _load_sb_player_map(conn)
+    tm_id_map, norm_map, last_nm_map = _load_sb_player_map(conn)
+
+    # Diagnostics
+    logger.info("  Sample DB norm_names: %s", list(norm_map.keys())[:5])
+    name_cols = [c for c in ("full_name", "first_name", "last_name") if c in df.columns]
+    logger.info(
+        "  Sample TM names: %s", df[name_cols].head(3).to_dict("records")
+    )
+    logger.info(
+        "  Sample TM ids (raw): %s",
+        df["transfermarkt_player_id"].dropna().head(5).tolist(),
+    )
 
     linked   = 0
     no_match = 0
-    updates  = []   # (tm_id, dob, nationality, position, internal_player_id)
+    by_method: dict[str, int] = {}
+    updates  = []
 
     for _, row in df.iterrows():
-        internal_pid = _resolve_tm_player(row, tm_id_map, norm_map)
+        internal_pid, method = _resolve_tm_player(
+            row, tm_id_map, norm_map, last_nm_map
+        )
         if internal_pid is None:
             no_match += 1
             continue
 
-        raw = row.get("transfermarkt_player_id")
-        tm_id = str(int(raw)) if pd.notna(raw) else None
+        bucket = method.split(":")[0]
+        by_method[bucket] = by_method.get(bucket, 0) + 1
+
+        tm_id = _to_tm_id(row.get("transfermarkt_player_id"))
         dob   = row.get("date_of_birth") if pd.notna(row.get("date_of_birth")) else None
 
-        # Use country_of_citizenship as nationality; fall back to country_of_birth
         nat = (
             str(row.get("country_of_citizenship") or "").strip()
             or str(row.get("country_of_birth") or "").strip()
             or None
-        )
-        if not nat:
-            nat = None
+        ) or None
 
-        # Prefer sub_position (e.g. "Centre-Forward") over position ("Attack")
         pos = (
             str(row.get("sub_position") or "").strip()
             or str(row.get("position")  or "").strip()
             or None
-        )
-        if not pos:
-            pos = None
+        ) or None
 
         updates.append((tm_id, dob, nat, pos, internal_pid))
 
-        # Keep tm_id_map current so Pass 2 can use it without a second DB read
+        # Always add to in-memory map so Pass 2 can use it
         if tm_id:
             tm_id_map[tm_id] = internal_pid
 
         linked += 1
 
-    logger.info("  Player matching: %d linked, %d not in StatsBomb data", linked, no_match)
+    logger.info(
+        "  Pass 1 result: %d linked, %d unmatched | by method: %s",
+        linked, no_match, by_method,
+    )
 
-    if updates:
-        with conn.cursor() as cur:
-            for tm_id, dob, nat, pos, pid in updates:
-                cur.execute("""
-                    UPDATE players
-                    SET
-                        transfermarkt_player_id = COALESCE(transfermarkt_player_id, %s),
-                        date_of_birth           = COALESCE(date_of_birth,           %s),
-                        nationality             = COALESCE(nationality,             %s),
-                        position                = COALESCE(position,                %s)
-                    WHERE player_id = %s
-                """, (tm_id, dob, nat, pos, pid))
-        conn.commit()
-        logger.info("  Updated %d player rows (DOB, TM ID, nationality, position)", len(updates))
-    else:
-        logger.warning(
-            "  No players matched -- check that ingest_statsbomb.py has run first "
-            "and that the players CSV path is correct"
+    if not updates:
+        logger.warning("  0 players matched -- check CSV paths and column names above")
+        return tm_id_map
+
+    with conn.cursor() as cur:
+        for tm_id, dob, nat, pos, pid in updates:
+            cur.execute("""
+                UPDATE players
+                SET
+                    transfermarkt_player_id = COALESCE(transfermarkt_player_id, %s),
+                    date_of_birth           = COALESCE(date_of_birth,           %s),
+                    nationality             = COALESCE(nationality,             %s),
+                    position                = COALESCE(position,                %s)
+                WHERE player_id = %s
+            """, (tm_id, dob, nat, pos, pid))
+    conn.commit()
+    logger.info("  Updated %d player rows", len(updates))
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM players WHERE transfermarkt_player_id IS NOT NULL"
+        )
+        logger.info(
+            "  DB now has %d players with transfermarkt_player_id set",
+            cur.fetchone()[0],
         )
 
+    logger.info("  tm_id_map size after Pass 1: %d", len(tm_id_map))
     return tm_id_map
 
 
@@ -197,44 +276,59 @@ def ingest_players(conn, players_csv: str) -> dict[str, int]:
 
 def ingest_injuries(conn, injuries_csv: str, tm_id_map: dict[str, int]):
     """
-    Insert injury records using the tm_id_map built by Pass 1.
+    Insert injury records using tm_id_map (direct integer lookup).
 
-    Every lookup is a direct integer match on transfermarkt_player_id --
-    no name fuzzy matching needed here.
-
-    injuries CSV columns (Transfermarkt schema)
-    -------------------------------------------
-    player_id     : Transfermarkt player ID  (= transfermarkt_player_id in players CSV)
-    player_name   : string  (logged only for unmatched rows)
-    season        : e.g. "2019"
-    injury        : injury description string
-    date_from     : injury start date
-    date_until    : return date
-    duration_days : int
-    games_missed  : int
+    injuries CSV expected columns (after lowercasing):
+      player_id, player_name, season, injury,
+      date_from, date_until, duration_days, games_missed
     """
-    logger.info("Pass 2: loading Transfermarkt injuries from: %s", injuries_csv)
+    logger.info("Pass 2: loading %s", injuries_csv)
     df = pd.read_csv(injuries_csv, low_memory=False)
-    logger.info("  %d rows in injuries CSV", len(df))
-
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    df["games_missed"] = pd.to_numeric(df["games_missed"], errors="coerce")
+    logger.info("  %d rows | columns: %s", len(df), list(df.columns))
+
+    # The injuries CSV player id column may also need detection
+    inj_id_col = _detect_tm_id_col(df)
+    if inj_id_col is None:
+        logger.error("  Cannot find player id column in injuries CSV")
+        return
+    if inj_id_col != "player_id":
+        df = df.rename(columns={inj_id_col: "player_id"})
+
+    sample_ids = df["player_id"].dropna().head(5).tolist()
+    logger.info(
+        "  Sample injury player_id values: %s (dtype=%s)",
+        sample_ids, df["player_id"].dtype,
+    )
+    logger.info(
+        "  Sample tm_id_map keys: %s (size=%d)",
+        list(tm_id_map.keys())[:5], len(tm_id_map),
+    )
+
+    if not tm_id_map:
+        logger.error(
+            "  tm_id_map is empty -- Pass 1 found 0 TM ids. "
+            "Check that the players CSV has a numeric player id column."
+        )
+        return
 
     for col in ("date_from", "date_until"):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
     injury_rows = []
-    matched     = 0
-    unmatched   = 0
+    matched   = 0
+    unmatched = 0
 
     for _, row in df.iterrows():
-        raw_tm_id = row.get("player_id")
-        tm_id     = str(int(raw_tm_id)) if pd.notna(raw_tm_id) else ""
+        tm_id = _to_tm_id(row.get("player_id"))
+        if tm_id is None:
+            unmatched += 1
+            continue
 
         internal_pid = tm_id_map.get(tm_id)
         if internal_pid is None:
-            # Player is in Transfermarkt but not in StatsBomb -- expected for
-            # players who never appeared in our in-scope competitions.
             unmatched += 1
             continue
 
@@ -248,11 +342,7 @@ def ingest_injuries(conn, injuries_csv: str, tm_id_map: dict[str, int]):
             str(row.get("season") or "").strip() or None,
         ))
 
-    logger.info(
-        "  Injury matching: %d matched, %d unmatched "
-        "(player not in StatsBomb in-scope competitions)",
-        matched, unmatched,
-    )
+    logger.info("  Injury matching: %d matched, %d unmatched", matched, unmatched)
 
     if injury_rows:
         with conn.cursor() as cur:
@@ -266,29 +356,14 @@ def ingest_injuries(conn, injuries_csv: str, tm_id_map: dict[str, int]):
         conn.commit()
         logger.info("  Inserted %d injury rows", len(injury_rows))
     else:
-        logger.warning(
-            "  No injury rows inserted -- verify that Pass 1 linked players correctly"
-        )
+        logger.warning("  No injury rows inserted")
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def run(
-    conn=None,
-    players_csv: str = None,
-    injuries_csv: str = None,
-):
-    """
-    Run both passes in order.
-
-    Parameters
-    ----------
-    conn          : psycopg2 connection  (created from DB_DSN if None)
-    players_csv   : path to transfermarkt_players.csv
-    injuries_csv  : path to transfermarkt_injuries.csv
-    """
+def run(conn=None, players_csv: str = None, injuries_csv: str = None):
     if conn is None:
         conn = connect(DB_DSN)
     if players_csv is None:
@@ -296,12 +371,8 @@ def run(
     if injuries_csv is None:
         injuries_csv = TRANSFERMARKT_CSV
 
-    # Pass 1: match TM players to StatsBomb players, backfill DOB + metadata
     tm_id_map = ingest_players(conn, players_csv)
-
-    # Pass 2: insert injury records -- direct ID lookup, no name matching
     ingest_injuries(conn, injuries_csv, tm_id_map)
-
     logger.info("Injuries ingestion complete")
 
 
