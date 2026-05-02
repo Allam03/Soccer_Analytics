@@ -27,17 +27,15 @@ def compute_injury_label(conn):
     """
     logger.info("Computing is_injured_next_30d label ...")
     with conn.cursor() as cur:
-        # Reset first so re-runs are idempotent
-        cur.execute("UPDATE player_match_stats SET is_injured_next_30d = FALSE")
-
         cur.execute("""
             UPDATE player_match_stats pms
             SET    is_injured_next_30d = TRUE
-            FROM   matches m
-            JOIN   injuries i ON i.player_id = pms.player_id
+            FROM   matches m,
+            injuries i
             WHERE  pms.match_id = m.match_id
-              AND  i.injury_date >= m.match_date
-              AND  i.injury_date <= m.match_date + INTERVAL '30 days'
+                AND  i.player_id = pms.player_id
+                AND  i.injury_date >= m.match_date
+                AND  i.injury_date <= m.match_date + INTERVAL '30 days';
         """)
         updated = cur.rowcount
     conn.commit()
