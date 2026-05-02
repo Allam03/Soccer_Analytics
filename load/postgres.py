@@ -1,17 +1,39 @@
+"""
+load/postgres.py
+
+Database write helpers.
+
+Performance changes vs original
+--------------------------------
+- upsert_match() no longer commits -- caller batches matches and commits
+  once per competition via commit().
+- insert_stats() page_size raised to 500 rows per VALUES page (was default
+  100), reducing round-trips by ~5x for a typical competition.
+- upsert_weather() unchanged (one row per match, called from weather
+  pipeline which manages its own commit cadence).
+- Added upsert_pass_edges() for batched edge insertion used by the
+  combined StatsBomb pipeline.
+"""
+
 import psycopg2
 from psycopg2.extras import execute_values
 
 
-def connect(dsn):
+def connect(dsn: str):
     return psycopg2.connect(dsn)
 
 
+# ---------------------------------------------------------------------------
+# Matches
+# ---------------------------------------------------------------------------
+
 def upsert_match(conn, row: dict) -> int:
     """
-    Insert or ignore a match row.  Returns the internal match_id.
+    Insert or update one match row.  Returns the internal match_id.
+    Does NOT commit -- caller is responsible for committing.
 
-    Expected keys in row
-    --------------------
+    Expected keys
+    -------------
     statsbomb_match_id, match_date, home_team_id, away_team_id,
     home_score, away_score, competition, season,
     stadium_name, stadium_lat, stadium_lng
@@ -39,19 +61,17 @@ def upsert_match(conn, row: dict) -> int:
                     stadium_lng  = EXCLUDED.stadium_lng
             RETURNING match_id
         """, row)
-        match_id = cur.fetchone()[0]
-    conn.commit()
-    return match_id
+        return cur.fetchone()[0]
 
+
+# ---------------------------------------------------------------------------
+# Weather
+# ---------------------------------------------------------------------------
 
 def upsert_weather(conn, match_id: int, weather: dict) -> int:
     """
-    Insert or update a weather row for a match. Returns weather_id.
-
-    Expected keys in weather
-    ------------------------
-    temperature_c, humidity_pct, wind_speed_kmh, precipitation_mm,
-    weather_condition (optional)
+    Insert or update a weather row for a match.  Commits immediately
+    (weather pipeline manages one row at a time).  Returns weather_id.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -60,10 +80,10 @@ def upsert_weather(conn, match_id: int, weather: dict) -> int:
                 wind_speed_kmh, precipitation_mm, weather_condition
             ) VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (match_id) DO UPDATE
-                SET temperature_c    = EXCLUDED.temperature_c,
-                    humidity_pct     = EXCLUDED.humidity_pct,
-                    wind_speed_kmh   = EXCLUDED.wind_speed_kmh,
-                    precipitation_mm = EXCLUDED.precipitation_mm,
+                SET temperature_c     = EXCLUDED.temperature_c,
+                    humidity_pct      = EXCLUDED.humidity_pct,
+                    wind_speed_kmh    = EXCLUDED.wind_speed_kmh,
+                    precipitation_mm  = EXCLUDED.precipitation_mm,
                     weather_condition = EXCLUDED.weather_condition
             RETURNING weather_id
         """, (
@@ -79,21 +99,24 @@ def upsert_weather(conn, match_id: int, weather: dict) -> int:
     return weather_id
 
 
-def insert_stats(conn, rows):
+# ---------------------------------------------------------------------------
+# Player match stats
+# ---------------------------------------------------------------------------
+
+def insert_stats(conn, rows: list, page_size: int = 500):
     """
-    Bulk-insert player match stat rows.
+    Bulk-insert / upsert player match stat rows.  Does NOT commit.
 
     Each row must be a tuple in this exact column order:
-    (
         player_id, match_id, team_id, weather_id, result,
         goals, assists, shots, xg, xa, key_passes,
-        passes_attempted, passes_completed, pass_accuracy, progressive_passes,
+        passes_attempted, passes_completed, pass_accuracy,
+        progressive_passes,
         carry_distance, progressive_carries,
         dribbles_completed,
         tackles, interceptions, clearances, pressures,
         yellow_cards, red_cards,
-        minutes_played, sub_minute,
-    )
+        minutes_played, sub_minute
     """
     if not rows:
         return
@@ -135,5 +158,28 @@ def insert_stats(conn, rows):
                 sub_minute          = EXCLUDED.sub_minute,
                 weather_id          = EXCLUDED.weather_id,
                 result              = EXCLUDED.result
-        """, rows)
-    conn.commit()
+        """, rows, page_size=page_size)
+
+
+# ---------------------------------------------------------------------------
+# Pass network edges
+# ---------------------------------------------------------------------------
+
+def upsert_pass_edges(conn, rows: list, page_size: int = 500):
+    """
+    Bulk-insert pass network edge rows.  Does NOT commit.
+
+    Each row: (match_id, team_id, passer_id, receiver_id,
+               pass_count, avg_x_start, avg_y_start, avg_x_end, avg_y_end)
+    """
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        execute_values(cur, """
+            INSERT INTO pass_network_edges (
+                match_id, team_id, passer_id, receiver_id,
+                pass_count,
+                avg_x_start, avg_y_start, avg_x_end, avg_y_end
+            ) VALUES %s
+            ON CONFLICT DO NOTHING
+        """, rows, page_size=page_size)
