@@ -1,22 +1,24 @@
 """
 main.py
 
-Full pipeline orchestrator.  Run this after init_db.py.
+Full pipeline orchestrator.  Run init_db.py once before first use.
 
 Execution order
 ---------------
-1. ingest_statsbomb   -- matches, players, teams, player_match_stats
-2. ingest_weather     -- weather table (Open-Meteo API)
-3. ingest_injuries    -- injuries table + players.date_of_birth (Transfermarkt)
-4. ingest_pass_network -- pass_network_edges (Model 2 input)
-5. compute_labels     -- is_injured_next_30d, workload features (Model 3)
+1. ingest_statsbomb   -- matches, players, teams, player_match_stats,
+                         pass_network_edges  (all in one parallel pass)
+2. ingest_weather     -- weather table (concurrent Open-Meteo requests)
+3. ingest_injuries    -- injuries table + players DOB (Transfermarkt CSVs)
+4. compute_labels     -- is_injured_next_30d, workload features
 
-Then train models (optional, pass --train to enable):
-  Model 1  Player clustering
-  Model 2  Team cohesion regression
-  Model 3  Injury risk classification
-  Model 4  Environmental impact regression
-  Model 5  Win probability classification
+Optional:
+5. --train            -- train all five ML models
+
+Flags
+-----
+--train         Train ML models after ingestion
+--skip-ingest   Skip steps 1-3, go straight to labels then optional training
+--workers N     Override number of worker processes (default: CPU count - 1)
 """
 
 import argparse
@@ -26,11 +28,10 @@ import psycopg2
 from config.settings import DB_DSN, DATA_ROOT
 from core.caches import TeamCache, PlayerCache
 from extract import statsbomb_local as sb
-from pipelines.ingest_statsbomb   import run as run_statsbomb
-from pipelines.ingest_weather     import run as run_weather
-from pipelines.ingest_injuries    import run as run_injuries
-from pipelines.ingest_pass_network import run as run_pass_network
-from pipelines.compute_labels     import run as run_labels
+from pipelines.ingest_statsbomb import run as run_statsbomb
+from pipelines.ingest_weather   import run as run_weather
+from pipelines.ingest_injuries  import run as run_injuries
+from pipelines.compute_labels   import run as run_labels
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,8 +42,12 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Soccer Analytics ML pipeline")
-    p.add_argument("--train",    action="store_true", help="Train ML models after ingestion")
-    p.add_argument("--skip-ingest", action="store_true", help="Skip ingestion, go straight to labels / training")
+    p.add_argument("--train",       action="store_true",
+                   help="Train ML models after ingestion")
+    p.add_argument("--skip-ingest", action="store_true",
+                   help="Skip ingestion steps, go straight to labels / training")
+    p.add_argument("--workers",     type=int, default=None,
+                   help="Worker processes for StatsBomb ingestion (default: CPU-1)")
     return p.parse_args()
 
 
@@ -53,43 +58,40 @@ def main():
     conn = psycopg2.connect(DB_DSN)
 
     if not args.skip_ingest:
-        # ---- 1. StatsBomb events ------------------------------------------
+        # ---- 1. StatsBomb events + pass network (parallel) ---------------
         logger.info("=" * 60)
-        logger.info("Step 1: StatsBomb ingestion")
+        logger.info("Step 1: StatsBomb ingestion (parallel, pass network included)")
         logger.info("=" * 60)
         team_cache   = TeamCache(conn)
         player_cache = PlayerCache(conn)
-        run_statsbomb(conn, team_cache, player_cache)
+        kwargs = {}
+        if args.workers is not None:
+            kwargs["workers"] = args.workers
+        run_statsbomb(conn, team_cache, player_cache, **kwargs)
 
-        # ---- 2. Weather ---------------------------------------------------
+        # ---- 2. Weather (concurrent HTTP) --------------------------------
         logger.info("=" * 60)
-        logger.info("Step 2: Weather ingestion (Open-Meteo)")
+        logger.info("Step 2: Weather ingestion (concurrent Open-Meteo)")
         logger.info("=" * 60)
         weather_cache = run_weather(conn)
         logger.info("Weather cache: %d entries", len(weather_cache))
 
-        # ---- 3. Injuries / Transfermarkt ----------------------------------
+        # ---- 3. Injuries / Transfermarkt ---------------------------------
         logger.info("=" * 60)
         logger.info("Step 3: Injuries ingestion (Transfermarkt)")
         logger.info("=" * 60)
         run_injuries(conn)
 
-        # ---- 4. Pass network edges ----------------------------------------
-        logger.info("=" * 60)
-        logger.info("Step 4: Pass network extraction")
-        logger.info("=" * 60)
-        run_pass_network(conn)
-
-    # ---- 5. Compute derived labels / features ----------------------------
+    # ---- 4. Compute derived labels / workload features ------------------
     logger.info("=" * 60)
-    logger.info("Step 5: Computing labels and workload features")
+    logger.info("Step 4: Computing labels and workload features")
     logger.info("=" * 60)
     run_labels(conn)
 
-    # ---- 6. Train ML models (optional) -----------------------------------
+    # ---- 5. Train ML models (optional) ----------------------------------
     if args.train:
         logger.info("=" * 60)
-        logger.info("Step 6: Training ML models")
+        logger.info("Step 5: Training ML models")
         logger.info("=" * 60)
 
         from models.model1_player_clustering import run as train1
@@ -100,16 +102,12 @@ def main():
 
         logger.info("Model 1: Player Efficiency and Style Profiling")
         train1(conn)
-
         logger.info("Model 2: Team Cohesion Analysis")
         train2(conn)
-
         logger.info("Model 3: Injury Risk Prediction")
         train3(conn)
-
         logger.info("Model 4: Environmental Impact Analysis")
         train4(conn)
-
         logger.info("Model 5: Win Probability Modeling")
         train5(conn)
 

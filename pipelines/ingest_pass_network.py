@@ -1,16 +1,14 @@
 """
 pipelines/ingest_pass_network.py
 
-Extract passer -> receiver edges from StatsBomb Pass events and populate
-the pass_network_edges table.  This feeds Model 2 (Team Cohesion Analysis).
+Pass network edges are now extracted inside ingest_statsbomb.py during the
+same event-loading pass (fix #7), so running the full pipeline via main.py
+no longer needs this file.
 
-Edge aggregation: one row per (match_id, team_id, passer_id, receiver_id)
-with:
-  - pass_count    : number of completed passes on this edge
-  - avg_x_start   : mean passer x position
-  - avg_y_start   : mean passer y position
-  - avg_x_end     : mean receiver x position (pass end_location)
-  - avg_y_end     : mean receiver y position
+This stub exists as a recovery / backfill tool: if you need to (re)populate
+pass_network_edges for matches that were ingested before fix #7, run this
+script directly.  It reads each event file exactly once and writes edges
+for any match that currently has no edge rows.
 """
 
 import logging
@@ -18,103 +16,79 @@ from collections import defaultdict
 
 from psycopg2.extras import execute_values
 
+from config.settings import DB_DSN
 from extract import statsbomb_local as sb
 from core.caches import TeamCache, PlayerCache
 from load.postgres import connect
-from config.settings import DB_DSN, COMPETITIONS
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_edges(events, pg_match_id, team_cache, player_cache):
-    """
-    Parse all Pass events in `events` and return a list of edge tuples
-    ready for bulk insertion.
+def _extract_edges(events, pg_match_id: int,
+                   player_cache, team_cache) -> list:
+    """Extract completed-pass edges from a match events DataFrame."""
+    from transform.features import extract_type_col, extract_player_id_col, extract_team_id_col
 
-    Returns
-    -------
-    list of tuples:
-        (match_id, team_id, passer_id, receiver_id,
-         pass_count, avg_x_start, avg_y_start, avg_x_end, avg_y_end)
-    """
-    # Accumulator: (pg_match_id, pg_team_id, passer_pid, receiver_pid)
-    #   -> {"count": int, "x_start": [], "y_start": [], "x_end": [], "y_end": []}
-    edge_data = defaultdict(lambda: {"count": 0, "xs": [], "ys": [], "xe": [], "ye": []})
+    type_col      = extract_type_col(events)
+    player_id_col = extract_player_id_col(events)
+    team_id_col   = extract_team_id_col(events)
 
-    pass_events = events[events["type"].apply(
-        lambda t: isinstance(t, dict) and t.get("name") == "Pass"
-    )]
+    is_pass = type_col == "Pass"
+    if not is_pass.any():
+        return []
 
-    for _, ev in pass_events.iterrows():
-        pass_data = ev.get("pass") or {}
+    acc = defaultdict(lambda: {"n": 0, "xs": 0.0, "ys": 0.0, "xe": 0.0, "ye": 0.0})
 
-        # Only count completed passes (outcome is None in StatsBomb)
+    pass_rows = events.loc[is_pass]
+    for (_, row), pid, tid in zip(pass_rows.iterrows(),
+                                   player_id_col[is_pass],
+                                   team_id_col[is_pass]):
+        pass_data = row.get("pass") or {}
         if pass_data.get("outcome") is not None:
             continue
-
-        passer = ev.get("player")
-        recip  = pass_data.get("recipient")
-        team   = ev.get("team")
-
-        if not (isinstance(passer, dict) and isinstance(recip, dict)
-                and isinstance(team, dict)):
+        recip = pass_data.get("recipient")
+        if not isinstance(recip, dict):
             continue
-
-        passer_sb = passer.get("id")
-        recip_sb  = recip.get("id")
-        team_sb   = team.get("id")
-
-        if not (passer_sb and recip_sb and team_sb):
+        rid = recip.get("id")
+        if not (pid and rid and tid):
             continue
 
         try:
-            pg_passer   = player_cache.get_or_create(passer_sb, passer.get("name", ""))
-            pg_receiver = player_cache.get_or_create(recip_sb,  recip.get("name", ""))
-            pg_team     = team_cache.get_or_create(team_sb,     team.get("name", ""))
-        except Exception as exc:
-            logger.debug("Cache error building edge: %s", exc)
+            pg_pid = player_cache.resolve(int(pid))
+            pg_rid = player_cache.resolve(int(rid))
+            pg_tid = team_cache.resolve(int(tid))
+        except KeyError:
             continue
 
-        key = (pg_match_id, pg_team, pg_passer, pg_receiver)
-        loc_start = ev.get("location") or []
-        loc_end   = pass_data.get("end_location") or []
-
-        acc = edge_data[key]
-        acc["count"] += 1
-        if len(loc_start) >= 2:
-            acc["xs"].append(loc_start[0])
-            acc["ys"].append(loc_start[1])
-        if len(loc_end) >= 2:
-            acc["xe"].append(loc_end[0])
-            acc["ye"].append(loc_end[1])
+        key = (pg_tid, pg_pid, pg_rid)
+        loc_s = row.get("location") or []
+        loc_e = pass_data.get("end_location") or []
+        a = acc[key]
+        a["n"] += 1
+        if len(loc_s) >= 2:
+            a["xs"] += loc_s[0]; a["ys"] += loc_s[1]
+        if len(loc_e) >= 2:
+            a["xe"] += loc_e[0]; a["ye"] += loc_e[1]
 
     rows = []
-    for (mid, tid, pid, rid), acc in edge_data.items():
-        avg = lambda lst: sum(lst) / len(lst) if lst else None
+    for (pg_tid, pg_pid, pg_rid), a in acc.items():
+        n = a["n"]
         rows.append((
-            mid, tid, pid, rid,
-            acc["count"],
-            avg(acc["xs"]),
-            avg(acc["ys"]),
-            avg(acc["xe"]),
-            avg(acc["ye"]),
+            pg_match_id, pg_tid, pg_pid, pg_rid, n,
+            a["xs"] / n, a["ys"] / n,
+            a["xe"] / n, a["ye"] / n,
         ))
     return rows
 
 
 def run(conn=None):
-    """
-    Iterate over all in-scope competition-seasons and populate
-    pass_network_edges for every match.  Skips matches that already
-    have edges (idempotent).
-    """
+    """Backfill pass_network_edges for matches that have none."""
     if conn is None:
         conn = connect(DB_DSN)
 
     team_cache   = TeamCache(conn)
     player_cache = PlayerCache(conn)
 
-    # Fetch all matches already in the DB
     with conn.cursor() as cur:
         cur.execute("""
             SELECT m.match_id, m.statsbomb_match_id
@@ -126,19 +100,21 @@ def run(conn=None):
         """)
         pending = cur.fetchall()
 
-    logger.info("Pass network: %d matches to process", len(pending))
-    inserted_total = 0
+    logger.info("Pass network backfill: %d matches without edges", len(pending))
+    if not pending:
+        logger.info("Nothing to do.")
+        return
 
+    inserted_total = 0
     for pg_match_id, sb_match_id in pending:
         try:
             events = sb.events(sb_match_id)
         except Exception as exc:
-            logger.error("Could not load events for SB match %d: %s", sb_match_id, exc)
+            logger.error("Could not load events for match %d: %s", sb_match_id, exc)
             continue
 
-        edge_rows = _extract_edges(events, pg_match_id, team_cache, player_cache)
+        edge_rows = _extract_edges(events, pg_match_id, player_cache, team_cache)
         if not edge_rows:
-            logger.debug("No pass edges for match %d", sb_match_id)
             continue
 
         with conn.cursor() as cur:
@@ -149,14 +125,16 @@ def run(conn=None):
                     avg_x_start, avg_y_start, avg_x_end, avg_y_end
                 ) VALUES %s
                 ON CONFLICT DO NOTHING
-            """, edge_rows)
+            """, edge_rows, page_size=500)
         conn.commit()
         inserted_total += len(edge_rows)
-        logger.info("  Match %d: %d edges inserted", sb_match_id, len(edge_rows))
 
-    logger.info("Pass network ingestion complete: %d total edges", inserted_total)
+    logger.info("Backfill complete: %d edges inserted", inserted_total)
 
 
 if __name__ == "__main__":
+    from extract import statsbomb_local as sb_mod
+    from config.settings import DATA_ROOT
     logging.basicConfig(level=logging.INFO)
+    sb_mod.set_root(DATA_ROOT)
     run()
