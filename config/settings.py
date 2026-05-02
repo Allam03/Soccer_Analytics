@@ -27,4 +27,10 @@ OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Path to the Transfermarkt injuries CSV
 # Download from: https://www.kaggle.com/datasets/irrazional/transfermarkt-injuries
-TRANSFERMARKT_CSV = r"E:\College\Final Project\transfermarkt.csv"
+TRANSFERMARKT_CSV = r"E:\College\Final Project\transfermarkt_injuries.csv"
+ 
+# Path to the Transfermarkt players CSV
+# Download from: https://www.kaggle.com/datasets/davidcariboo/player-scores?select=players.csv
+# Contains: transfermarkt_player_id, full_name, date_of_birth, position,
+#           country_of_citizenship, market_value_in_eur, etc.
+TRANSFERMARKT_PLAYERS_CSV = r"E:\College\Final Project\transfermarkt_players.csv"
