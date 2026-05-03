@@ -3,42 +3,57 @@ transform/features.py
 
 Vectorised per-player feature aggregation for one match.
 
-Key design
-----------
-- Caller does ONE groupby over the match events DataFrame and passes each
-  player's pre-filtered slice here, eliminating repeated full-DataFrame
-  scans.
-- No iterrows() anywhere -- all counting and arithmetic uses pandas
-  boolean masks and .sum() / .max().
-- _dist_to_goal and progressive thresholds are applied with numpy
-  vectorised ops on the location columns.
+xa fix
+------
+StatsBomb open data does not include an 'xA' field directly on the pass dict
+in the way the commercial feed does.  In the open data, expected assists are
+derived by looking at passes that preceded a shot and using the shot's
+statsbomb_xg as the xA value for the passer.
+
+Approach:
+1. Build a mapping from (shot event index) -> xg for all shot events.
+2. For each completed pass, look up the next shot event in the same
+   possession sequence using the 'shot_assist' flag or by checking whether
+   the very next shot event belongs to the same possession.  If found,
+   assign that shot's xg as the pass's xA contribution.
+
+Simpler approximation used here (avoids tracking possession chains):
+- A pass with shot_assist=True is a key pass.
+- Its xA is set to the average xg of all shots in the match weighted by
+  the pass location distance to goal -- this is an approximation.
+- A pass with goal_assist=True gets xA = 1.0 (the goal happened).
+
+Actually the cleanest and most accurate approach for open data:
+StatsBomb stores 'shot_assist': True on the pass, and separately stores
+the shot's statsbomb_xg.  We can match them via the 'related_events' list
+on each event.  However, related_events requires iterating pairs.
+
+Practical fix: use the 'through_ball', 'switch', 'cross', and technique
+flags to detect key passes, and for xA use the shot xg of shots that
+immediately follow (within the same team's possession, next 2 events).
+This is what most open-data pipelines do.
+
+For correctness we use: if pass has shot_assist flag -> find the linked
+shot via related_events and assign its xg as xa.  Falls back to 0 if
+related_events is missing (older spec).
 """
 
 import math
 import numpy as np
 import pandas as pd
 
-_GOAL_X   = 120.0
-_GOAL_Y   = 40.0
-_PROG_PASS_THRESHOLD   = 25.0   # yards closer to goal
-_PROG_CARRY_THRESHOLD  = 10.0   # yards closer to goal
-_PROG_CARRY_MIN_X      = 48.0   # must end in attacking half
+_GOAL_X  = 120.0
+_GOAL_Y  = 40.0
+_PROG_PASS_THRESHOLD  = 25.0
+_PROG_CARRY_THRESHOLD = 10.0
+_PROG_CARRY_MIN_X     = 48.0
 
-
-# ---------------------------------------------------------------------------
-# Vectorised location helpers
-# ---------------------------------------------------------------------------
 
 def _vec_dist_to_goal(locs: pd.Series) -> pd.Series:
-    """
-    Given a Series of [x, y] lists (StatsBomb location format), return a
-    float Series of distances to the goal centre (120, 40).
-    Returns NaN where the location is missing or malformed.
-    """
     def _single(loc):
         if isinstance(loc, (list, tuple)) and len(loc) >= 2:
             try:
-                return math.sqrt((loc[0] - _GOAL_X) ** 2 + (loc[1] - _GOAL_Y) ** 2)
+                return math.sqrt((loc[0] - _GOAL_X)**2 + (loc[1] - _GOAL_Y)**2)
             except (TypeError, ValueError):
                 pass
         return float("nan")
@@ -46,35 +61,24 @@ def _vec_dist_to_goal(locs: pd.Series) -> pd.Series:
 
 
 def _vec_dist(starts: pd.Series, ends: pd.Series) -> pd.Series:
-    """Euclidean distance between two Series of [x, y] locations."""
     def _single(pair):
         a, b = pair
         if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
             try:
-                return math.sqrt((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2)
+                return math.sqrt((b[0]-a[0])**2 + (b[1]-a[1])**2)
             except (TypeError, ValueError, IndexError):
                 pass
         return 0.0
     return pd.Series(zip(starts, ends)).map(_single)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def extract_type_col(events: pd.DataFrame) -> pd.Series:
-    """
-    Return a plain string Series of event-type names from the nested
-    type dict column.  Call this ONCE per match and pass the result into
-    agg_match_by_player().
-    """
     return events["type"].map(
         lambda t: t.get("name") if isinstance(t, dict) else (t or "")
     )
 
 
 def extract_player_id_col(events: pd.DataFrame) -> pd.Series:
-    """Return integer player-id Series (NaN for events with no player)."""
     return events["player"].map(
         lambda p: p.get("id") if isinstance(p, dict) and isinstance(p.get("id"), int)
         else None
@@ -82,11 +86,87 @@ def extract_player_id_col(events: pd.DataFrame) -> pd.Series:
 
 
 def extract_team_id_col(events: pd.DataFrame) -> pd.Series:
-    """Return integer team-id Series."""
     return events["team"].map(
         lambda t: t.get("id") if isinstance(t, dict) and isinstance(t.get("id"), int)
         else None
     )
+
+
+def _build_xa_map(events: pd.DataFrame) -> dict:
+    """
+    Build {event_uuid -> xa_value} for all passes that assisted a shot.
+
+    Strategy: for each shot event, check its 'related_events' list.
+    Any UUID in that list that belongs to a Pass event is the key pass;
+    assign the shot's statsbomb_xg as xa for that pass.
+
+    Falls back to the 'xA' field on the pass dict if present (commercial feed).
+    Returns a dict from event index (integer) to xa float.
+    """
+    # Build uuid -> (index, type_name, xg) for shots
+    shot_by_uuid: dict[str, float] = {}
+    pass_idx_by_uuid: dict[str, int] = {}
+
+    for idx, row in events.iterrows():
+        t = row.get("type")
+        t_name = t.get("name") if isinstance(t, dict) else t
+
+        uid = row.get("id")  # StatsBomb event UUID
+
+        if t_name == "Shot":
+            shot_data = row.get("shot") or {}
+            xg = shot_data.get("statsbomb_xg") or 0.0
+            if uid:
+                shot_by_uuid[uid] = xg
+            # Also register related events pointing back to the assist pass
+            related = row.get("related_events") or []
+            for rel_uid in related:
+                # We'll resolve these below
+                shot_by_uuid.setdefault(f"__shot_for_{rel_uid}", xg)
+
+        if t_name == "Pass":
+            if uid:
+                pass_idx_by_uuid[uid] = idx
+
+    # Build the xa_map: pass_index -> xa
+    xa_map: dict[int, float] = {}
+
+    for idx, row in events.iterrows():
+        t = row.get("type")
+        t_name = t.get("name") if isinstance(t, dict) else t
+        if t_name != "Pass":
+            continue
+
+        pass_dict = row.get("pass") or {}
+
+        # Method 1: explicit xA field (commercial feed)
+        explicit_xa = pass_dict.get("xA")
+        if explicit_xa is not None:
+            xa_map[idx] = float(explicit_xa)
+            continue
+
+        # Method 2: related_events on this pass -> find linked shot xg
+        uid = row.get("id")
+        if uid:
+            shot_xg = shot_by_uuid.get(f"__shot_for_{uid}")
+            if shot_xg is not None:
+                xa_map[idx] = shot_xg
+                continue
+
+        # Method 3: shot_assist flag -> use related_events on the shot side
+        if pass_dict.get("shot_assist") or pass_dict.get("goal_assist"):
+            related = row.get("related_events") or []
+            for rel_uid in related:
+                xg = shot_by_uuid.get(rel_uid)
+                if xg is not None:
+                    xa_map[idx] = xg
+                    break
+            else:
+                # goal_assist but no linked xg found: use 1.0 as proxy
+                if pass_dict.get("goal_assist"):
+                    xa_map[idx] = 1.0
+
+    return xa_map
 
 
 def agg_match_by_player(
@@ -94,48 +174,24 @@ def agg_match_by_player(
     type_col: pd.Series,
     player_id_col: pd.Series,
 ) -> dict[int, dict]:
-    """
-    Aggregate all events in ONE match into a per-player stats dict.
-
-    Parameters
-    ----------
-    events        : Full match events DataFrame.
-    type_col      : Pre-extracted string Series of event type names
-                    (from extract_type_col).
-    player_id_col : Pre-extracted player-id Series
-                    (from extract_player_id_col).
-
-    Returns
-    -------
-    {sb_player_id -> stats_dict}
-    """
-    # Attach the flat columns so we can groupby without re-extracting
     ev = events.copy(deep=False)
     ev["_type"]      = type_col
     ev["_player_id"] = player_id_col
-
-    # Drop events with no player (ball receipts, half-starts, etc.)
     ev = ev.dropna(subset=["_player_id"])
     ev["_player_id"] = ev["_player_id"].astype(int)
 
+    # Build xa map once per match (uses all events including shots)
+    xa_map = _build_xa_map(events)
+
     result: dict[int, dict] = {}
-
     for pid, pe in ev.groupby("_player_id", sort=False):
-        result[pid] = _agg_player_slice(pe, pid)
-
+        result[pid] = _agg_player_slice(pe, pid, xa_map)
     return result
 
 
-def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
-    """
-    Aggregate one player's events (already filtered to that player).
-    All operations are mask + .sum() -- no Python-level loops over rows.
-    """
+def _agg_player_slice(pe: pd.DataFrame, pid: int, xa_map: dict) -> dict:
     types = pe["_type"]
 
-    # ------------------------------------------------------------------
-    # Pre-build type masks (each used multiple times)
-    # ------------------------------------------------------------------
     is_shot         = types == "Shot"
     is_pass         = types == "Pass"
     is_carry        = types == "Carry"
@@ -147,12 +203,9 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
     is_bad_beh      = types == "Bad Behaviour"
     is_sub          = types == "Substitution"
 
-    # ------------------------------------------------------------------
     # Shots
-    # ------------------------------------------------------------------
     shots = int(is_shot.sum())
-    xg    = 0.0
-    goals = 0
+    xg = goals = 0.0
     if shots:
         shot_col = pe.loc[is_shot, "shot"].map(
             lambda s: s if isinstance(s, dict) else {}
@@ -162,9 +215,7 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
             lambda s: 1 if _resolve_name(s.get("outcome")) == "Goal" else 0
         ).sum())
 
-    # ------------------------------------------------------------------
     # Passes
-    # ------------------------------------------------------------------
     passes_attempted = int(is_pass.sum())
     passes_completed = assists = key_passes = progressive_passes = 0
     xa = 0.0
@@ -172,15 +223,15 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
         pass_col = pe.loc[is_pass, "pass"].map(
             lambda p: p if isinstance(p, dict) else {}
         )
-        # Completed = outcome is None
-        passes_completed  = int(pass_col.map(lambda p: p.get("outcome") is None).sum())
-        assists           = int(pass_col.map(lambda p: bool(p.get("goal_assist"))).sum())
-        key_passes        = int(pass_col.map(
+        passes_completed = int(pass_col.map(lambda p: p.get("outcome") is None).sum())
+        assists          = int(pass_col.map(lambda p: bool(p.get("goal_assist"))).sum())
+        key_passes       = int(pass_col.map(
             lambda p: bool(p.get("shot_assist") or p.get("goal_assist"))
         ).sum())
-        xa                = float(pass_col.map(lambda p: p.get("xA") or 0.0).sum())
 
-        # Progressive passes -- vectorised distance calculation
+        # xa: sum from pre-built xa_map (indexed by event dataframe index)
+        xa = float(sum(xa_map.get(idx, 0.0) for idx in pe.loc[is_pass].index))
+
         start_locs = pe.loc[is_pass, "location"]
         end_locs   = pass_col.map(lambda p: p.get("end_location"))
         d_start    = _vec_dist_to_goal(start_locs)
@@ -189,19 +240,15 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
 
     pass_accuracy = (passes_completed / passes_attempted * 100) if passes_attempted else 0.0
 
-    # ------------------------------------------------------------------
     # Carries
-    # ------------------------------------------------------------------
-    carry_distance      = 0.0
-    progressive_carries = 0
+    carry_distance = progressive_carries = 0.0
     if is_carry.sum():
         carry_col  = pe.loc[is_carry, "carry"].map(
             lambda c: c if isinstance(c, dict) else {}
         )
         start_locs = pe.loc[is_carry, "location"]
         end_locs   = carry_col.map(lambda c: c.get("end_location"))
-        dists      = _vec_dist(start_locs, end_locs)
-        carry_distance = float(dists.sum())
+        carry_distance = float(_vec_dist(start_locs, end_locs).sum())
 
         d_start = _vec_dist_to_goal(start_locs)
         d_end   = _vec_dist_to_goal(end_locs)
@@ -211,9 +258,7 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
         mask = ((d_start - d_end) >= _PROG_CARRY_THRESHOLD) & (end_x >= _PROG_CARRY_MIN_X)
         progressive_carries = int(mask.sum().item())
 
-    # ------------------------------------------------------------------
     # Dribbles
-    # ------------------------------------------------------------------
     dribbles_completed = 0
     if is_dribble.sum():
         drib_col = pe.loc[is_dribble, "dribble"].map(
@@ -223,9 +268,7 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
             drib_col.map(lambda d: _resolve_name(d.get("outcome")) == "Complete").sum()
         )
 
-    # ------------------------------------------------------------------
-    # Duels / Tackles
-    # ------------------------------------------------------------------
+    # Tackles
     tackles = 0
     if is_duel.sum():
         duel_col = pe.loc[is_duel, "duel"].map(
@@ -235,39 +278,32 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
             duel_col.map(lambda d: _resolve_name(d.get("type")) == "Tackle").sum()
         )
 
-    # ------------------------------------------------------------------
-    # Simple counts
-    # ------------------------------------------------------------------
     interceptions = int(is_interception.sum())
     clearances    = int(is_clearance.sum())
     pressures     = int(is_pressure.sum())
 
-    # ------------------------------------------------------------------
     # Discipline
-    # ------------------------------------------------------------------
     yellow_cards = red_cards = 0
     if is_bad_beh.sum():
         bb_col = pe.loc[is_bad_beh, "bad_behaviour"].map(
             lambda b: b if isinstance(b, dict) else {}
         )
-        card_names    = bb_col.map(lambda b: _resolve_name(b.get("card")) or "")
-        yellow_cards  = int(card_names.isin({"Yellow Card", "Second Yellow"}).sum())
-        red_cards     = int((card_names == "Red Card").sum())
+        card_names   = bb_col.map(lambda b: _resolve_name(b.get("card")) or "")
+        yellow_cards = int(card_names.isin({"Yellow Card", "Second Yellow"}).sum())
+        red_cards    = int((card_names == "Red Card").sum())
 
-    # ------------------------------------------------------------------
-    # Substitution + minutes played
-    # ------------------------------------------------------------------
+    # Sub + minutes
     sub_minute = None
     if is_sub.sum():
-        sub_minutes = pe.loc[is_sub, "minute"]
-        if len(sub_minutes):
-            sub_minute = int(sub_minutes.iloc[0])
+        sub_mins = pe.loc[is_sub, "minute"]
+        if len(sub_mins):
+            sub_minute = int(sub_mins.iloc[0])
 
-    last_minute = int(pe["minute"].max()) if len(pe) and "minute" in pe.columns else 0
+    last_minute    = int(pe["minute"].max()) if len(pe) and "minute" in pe.columns else 0
     minutes_played = sub_minute if sub_minute is not None else last_minute
 
     return {
-        "goals":               goals,
+        "goals":               int(goals),
         "assists":             assists,
         "shots":               shots,
         "xg":                  xg,
@@ -278,7 +314,7 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
         "pass_accuracy":       pass_accuracy,
         "progressive_passes":  progressive_passes,
         "carry_distance":      carry_distance,
-        "progressive_carries": progressive_carries,
+        "progressive_carries": int(progressive_carries),
         "dribbles_completed":  dribbles_completed,
         "tackles":             tackles,
         "interceptions":       interceptions,
@@ -291,17 +327,8 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Backwards-compatible single-player entry point
-# (kept so any code that still calls agg_player_events() keeps working)
-# ---------------------------------------------------------------------------
-
 def agg_player_events(events: pd.DataFrame, pid: int, event_type_fn) -> dict:
-    """
-    Single-player aggregation.  Delegates to the vectorised path.
-    Kept for backwards compatibility -- prefer agg_match_by_player()
-    when processing a full match.
-    """
+    """Backwards-compatible single-player entry point."""
     type_col      = extract_type_col(events)
     player_id_col = extract_player_id_col(events)
     all_stats     = agg_match_by_player(events, type_col, player_id_col)
@@ -323,7 +350,6 @@ def _empty_stats() -> dict:
 
 
 def _resolve_name(val) -> str:
-    """Extract .name from a StatsBomb ref-dict, or return the value as-is."""
     if isinstance(val, dict):
         return val.get("name", "")
     return val or ""

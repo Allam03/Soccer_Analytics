@@ -7,9 +7,6 @@ DATA_ROOT = r"E:\College\Final Project\open-data-master\data"
 # UCL 2018/19: competition_id=16, season_id=4
 # World Cup 2018: competition_id=43, season_id=3
 # World Cup 2022: competition_id=43, season_id=106
-#
-# StatsBomb season IDs -- confirm against your local competitions.json
-# if any IDs differ, update here.
 COMPETITIONS = {
     (11, 26),   # La Liga 2015/16
     (11, 27),   # La Liga 2016/17
@@ -29,11 +26,6 @@ OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 # Download from: https://www.kaggle.com/datasets/irrazional/transfermarkt-injuries
 TRANSFERMARKT_CSV = r"E:\College\Final Project\transfermarkt_injuries.csv"
 
-# Path to the Transfermarkt players CSV (same dataset, players table)
-# Contains: transfermarkt_player_id, full_name, date_of_birth, position,
-#           country_of_citizenship, market_value_in_eur, etc.
+# Path to the Transfermarkt players CSV
+# Download from: https://www.kaggle.com/datasets/davidcariboo/player-scores?select=players.csv
 TRANSFERMARKT_PLAYERS_CSV = r"E:\College\Final Project\transfermarkt_players.csv"
-
-# Directory for pipeline diagnostic outputs (unmatched rows, audit CSVs, etc.)
-# Created automatically if it does not exist.
-OUTPUT_DIR = r"E:\College\Final Project\pipeline_output"

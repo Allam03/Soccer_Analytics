@@ -1,18 +1,9 @@
 """
 load/postgres.py
 
-Database write helpers.
-
-Performance changes vs original
---------------------------------
-- upsert_match() no longer commits -- caller batches matches and commits
-  once per competition via commit().
-- insert_stats() page_size raised to 500 rows per VALUES page (was default
-  100), reducing round-trips by ~5x for a typical competition.
-- upsert_weather() unchanged (one row per match, called from weather
-  pipeline which manages its own commit cadence).
-- Added upsert_pass_edges() for batched edge insertion used by the
-  combined StatsBomb pipeline.
+Database write helpers.  All column references use the renamed schema:
+  sb_match_id, sb_team_id, sb_player_id  (source identifiers)
+  match_id, team_id, player_id           (internal surrogate PKs)
 """
 
 import psycopg2
@@ -30,30 +21,30 @@ def connect(dsn: str):
 def upsert_match(conn, row: dict) -> int:
     """
     Insert or update one match row.  Returns the internal match_id.
-    Does NOT commit -- caller is responsible for committing.
+    Does NOT commit.
 
     Expected keys
     -------------
-    statsbomb_match_id, match_date, home_team_id, away_team_id,
+    sb_match_id, match_date, home_team_id, away_team_id,
     home_score, away_score, competition, season,
     stadium_name, stadium_lat, stadium_lng
     """
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO matches (
-                statsbomb_match_id, match_date,
+                sb_match_id, match_date,
                 home_team_id, away_team_id,
                 home_score, away_score,
                 competition, season,
                 stadium_name, stadium_lat, stadium_lng
             ) VALUES (
-                %(statsbomb_match_id)s, %(match_date)s,
+                %(sb_match_id)s, %(match_date)s,
                 %(home_team_id)s, %(away_team_id)s,
                 %(home_score)s, %(away_score)s,
                 %(competition)s, %(season)s,
                 %(stadium_name)s, %(stadium_lat)s, %(stadium_lng)s
             )
-            ON CONFLICT (statsbomb_match_id) DO UPDATE
+            ON CONFLICT (sb_match_id) DO UPDATE
                 SET home_score   = EXCLUDED.home_score,
                     away_score   = EXCLUDED.away_score,
                     stadium_name = EXCLUDED.stadium_name,
@@ -70,8 +61,7 @@ def upsert_match(conn, row: dict) -> int:
 
 def upsert_weather(conn, match_id: int, weather: dict) -> int:
     """
-    Insert or update a weather row for a match.  Commits immediately
-    (weather pipeline manages one row at a time).  Returns weather_id.
+    Insert or update a weather row.  Commits immediately.  Returns weather_id.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -105,9 +95,9 @@ def upsert_weather(conn, match_id: int, weather: dict) -> int:
 
 def insert_stats(conn, rows: list, page_size: int = 500):
     """
-    Bulk-insert / upsert player match stat rows.  Does NOT commit.
+    Bulk-upsert player match stat rows.  Does NOT commit.
 
-    Each row must be a tuple in this exact column order:
+    Tuple column order:
         player_id, match_id, team_id, weather_id, result,
         goals, assists, shots, xg, xa, key_passes,
         passes_attempted, passes_completed, pass_accuracy,

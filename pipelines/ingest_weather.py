@@ -1,24 +1,20 @@
 """
 pipelines/ingest_weather.py
 
-Fetch historical weather data from Open-Meteo for every match and upsert
-into the weather table.
+Fetch historical weather from Open-Meteo and backfill weather_id into
+player_match_stats.
 
-Stadium name normalisation fix
--------------------------------
-StatsBomb stadium names often contain accents, diacritics, and spacing
-variations (e.g. "Estadio Ramón Sánchez-Pizjuán") that don't match the
-plain-ASCII dict keys.  At startup, STADIUM_COORDS is re-indexed under
-normalised keys using the same norm_name() logic applied to player names
-(strip accents, lowercase, collapse spaces).  Incoming stadium names from
-the DB are normalised the same way before lookup.
-
-Concurrent HTTP fix (fix #8)
------------------------------
-ThreadPoolExecutor + Semaphore replaces sequential sleep loop.
+Changes
+-------
+- Retry + exponential backoff on rate-limit (HTTP 429) and transient errors
+- weather_condition derived from numeric fields (was always NULL)
+- weather_id backfill: after inserting weather rows, UPDATE player_match_stats
+  so rows written by ingest_statsbomb (which runs first) get their weather_id set
+- Logging reduced to essential progress lines
 """
 
 import logging
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -31,13 +27,20 @@ from config.settings import DB_DSN, OPEN_METEO_URL
 logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT  = 4
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 20
+MAX_RETRIES     = 4          # attempts per request
+RETRY_BASE_SECS = 2.0        # exponential backoff base
+
+_DAILY_VARS = (
+    "temperature_2m_max,temperature_2m_min,"
+    "precipitation_sum,windspeed_10m_max,"
+    "relative_humidity_2m_max"
+)
 
 # ---------------------------------------------------------------------------
-# Stadium coordinate table  (plain ASCII keys -- normalised at import time)
+# Stadium coordinates (normalised at import time)
 # ---------------------------------------------------------------------------
 _STADIUM_COORDS_RAW = {
-    # La Liga
     "Camp Nou":                          (41.3809,   2.1228),
     "Santiago Bernabeu":                 (40.4531,  -3.6883),
     "Estadio Wanda Metropolitano":       (40.4361,  -3.5995),
@@ -75,8 +78,6 @@ _STADIUM_COORDS_RAW = {
     "Estadi Municipal de Montilivi":     (41.9833,   2.8167),
     "Estadio RCDE":                      (41.3473,   2.0758),
     "Estadio Benito Villamarin":         (37.3567,  -5.9814),
-
-    # Additional Spain stadiums
     "Coliseum Alfonso Pérez":            (40.3256,  -3.7143),
     "Estadi Mallorca Son Moix":          (39.5899,   2.6303),
     "Estadio Abanca-Riazor":             (43.3687,  -8.4173),
@@ -86,9 +87,7 @@ _STADIUM_COORDS_RAW = {
     "Estadio Manuel Martínez Valero":    (38.2669,  -0.6635),
     "Estadio Municipal José Zorrilla":   (41.6443,  -4.7612),
     "Estadio Nuevo Arcángel":            (37.8886,  -4.7896),
-    "Estadio Vicente Calderón": (40.4017, -3.7206),
-
-    # World Cup 2018 -- Russia
+    "Estadio Vicente Calderón":          (40.4017,  -3.7206),
     "Luzhniki Stadium":                  (55.7317,  37.5600),
     "Stadion Luzhniki":                  (55.7317,  37.5600),
     "Saint Petersburg Stadium":          (59.9724,  30.2219),
@@ -105,9 +104,7 @@ _STADIUM_COORDS_RAW = {
     "Solidarnost Arena":                 (53.4133,  50.1725),
     "Kaliningrad Stadium":               (54.7138,  20.5167),
     "Stadion Kaliningrad":               (54.7138,  20.5167),
-    "Otkritie Bank Arena":      (55.8178, 37.4403),
-
-    # World Cup 2022 -- Qatar
+    "Otkritie Bank Arena":               (55.8178,  37.4403),
     "Lusail Iconic Stadium":             (25.4333,  51.5000),
     "Al Bayt Stadium":                   (25.6572,  51.5150),
     "Ahmad Bin Ali Stadium":             (25.2477,  51.4041),
@@ -116,8 +113,6 @@ _STADIUM_COORDS_RAW = {
     "Khalifa International Stadium":     (25.2632,  51.4500),
     "Stadium 974":                       (25.2735,  51.5497),
     "Al Janoub Stadium":                 (25.1270,  51.5000),
-
-    # UCL 2018/19
     "Anfield":                           (53.4308,  -2.9608),
     "Johan Cruijff Arena":               (52.3143,   4.9418),
     "Tottenham Hotspur Stadium":         (51.6042,  -0.0664),
@@ -135,96 +130,131 @@ _STADIUM_COORDS_RAW = {
     "Estadio do Dragao":                 (41.1614,  -8.5839),
 }
 
-# Build a normalised lookup dict once at import time.
-# Both keys AND incoming stadium names from the DB are passed through
-# norm_name() before comparison, so accents / casing mismatches are
-# eliminated automatically.
 STADIUM_COORDS: dict[str, tuple] = {
     norm_name(k): v for k, v in _STADIUM_COORDS_RAW.items()
 }
 
-_DAILY_VARS = (
-    "temperature_2m_max,temperature_2m_min,"
-    "precipitation_sum,windspeed_10m_max,"
-    "relative_humidity_2m_max"
-)
 
-
-def _resolve_coords(
-    stadium_name: str | None,
-    lat: float | None,
-    lng: float | None,
-) -> tuple[float, float] | None:
-    """
-    Return (lat, lng) for a match, or None if coordinates cannot be found.
-
-    Prefers explicit DB coords, falls back to the normalised lookup table.
-    """
+def _resolve_coords(stadium_name, lat, lng):
     if lat is not None and lng is not None:
         return lat, lng
-
     if not stadium_name:
         return None
-
     nn = norm_name(stadium_name)
     coords = STADIUM_COORDS.get(nn)
     if coords:
         return coords
-
-    # Partial match fallback: try if any key starts with the incoming name
-    # (handles "Camp Nou" matching "camp nou barcelona" variants)
     for key, val in STADIUM_COORDS.items():
         if nn in key or key in nn:
             return val
-
     return None
 
 
-def _fetch_one(
-    match_id: int,
-    lat: float,
-    lng: float,
-    date_str: str,
-    sem: threading.Semaphore,
-) -> tuple[int, dict | None]:
-    """Fetch weather for one match in a worker thread."""
-    with sem:
-        params = {
-            "latitude":   lat,
-            "longitude":  lng,
-            "start_date": date_str,
-            "end_date":   date_str,
-            "daily":      _DAILY_VARS,
-            "timezone":   "UTC",
-        }
-        try:
-            resp  = requests.get(OPEN_METEO_URL, params=params, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            daily = resp.json().get("daily", {})
-
-            t_max = (daily.get("temperature_2m_max") or [None])[0]
-            t_min = (daily.get("temperature_2m_min") or [None])[0]
-            temp  = (t_max + t_min) / 2 if (t_max is not None and t_min is not None) else None
-
-            return match_id, {
-                "temperature_c":    temp,
-                "precipitation_mm": (daily.get("precipitation_sum")        or [None])[0],
-                "wind_speed_kmh":   (daily.get("windspeed_10m_max")        or [None])[0],
-                "humidity_pct":     (daily.get("relative_humidity_2m_max") or [None])[0],
-                "weather_condition": None,
-            }
-        except Exception as exc:
-            logger.warning(
-                "Open-Meteo failed (match=%d %s): %s", match_id, date_str, exc
-            )
-            return match_id, None
-
-
-def run(conn=None, max_concurrent: int = MAX_CONCURRENT) -> dict:
+def _derive_condition(temp_c, precip_mm, wind_kmh) -> str:
     """
-    Fetch and store weather for all matches that lack a weather row.
+    Map numeric weather values to a human-readable condition label.
 
-    Returns {pg_match_id -> weather_id}.
+    Rules (order matters — first match wins):
+      heavy_rain  precip >= 5 mm
+      rain        precip >= 1 mm
+      windy       wind  >= 50 km/h
+      cold        temp  <   5 °C
+      hot         temp  >=  30 °C
+      clear       default
+    """
+    p = precip_mm or 0.0
+    w = wind_kmh  or 0.0
+    t = temp_c    if temp_c is not None else 15.0
+
+    if p >= 5.0:
+        return "heavy_rain"
+    if p >= 1.0:
+        return "rain"
+    if w >= 50.0:
+        return "windy"
+    if t < 5.0:
+        return "cold"
+    if t >= 30.0:
+        return "hot"
+    return "clear"
+
+
+def _fetch_one(match_id, lat, lng, date_str, sem):
+    """Fetch weather for one match with retry + exponential backoff."""
+    params = {
+        "latitude":   lat,
+        "longitude":  lng,
+        "start_date": date_str,
+        "end_date":   date_str,
+        "daily":      _DAILY_VARS,
+        "timezone":   "UTC",
+    }
+
+    with sem:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.get(
+                    OPEN_METEO_URL, params=params, timeout=REQUEST_TIMEOUT
+                )
+                if resp.status_code == 429:
+                    wait = RETRY_BASE_SECS * (2 ** (attempt - 1))
+                    logger.debug("Rate limited match %d, retry %d in %.0fs",
+                                 match_id, attempt, wait)
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                daily = resp.json().get("daily", {})
+
+                t_max = (daily.get("temperature_2m_max") or [None])[0]
+                t_min = (daily.get("temperature_2m_min") or [None])[0]
+                temp  = (t_max + t_min) / 2 if (t_max is not None and t_min is not None) else None
+                precip = (daily.get("precipitation_sum")        or [None])[0]
+                wind   = (daily.get("windspeed_10m_max")        or [None])[0]
+                humid  = (daily.get("relative_humidity_2m_max") or [None])[0]
+
+                return match_id, {
+                    "temperature_c":    temp,
+                    "precipitation_mm": precip,
+                    "wind_speed_kmh":   wind,
+                    "humidity_pct":     humid,
+                    "weather_condition": _derive_condition(temp, precip, wind),
+                }
+
+            except requests.exceptions.RequestException as exc:
+                if attempt == MAX_RETRIES:
+                    logger.warning("Weather fetch failed match %d after %d attempts: %s",
+                                   match_id, MAX_RETRIES, exc)
+                    return match_id, None
+                time.sleep(RETRY_BASE_SECS * (2 ** (attempt - 1)))
+
+    return match_id, None
+
+
+def _backfill_weather_ids(conn):
+    """
+    After inserting weather rows, set weather_id on player_match_stats rows
+    that were written by ingest_statsbomb with weather_id = NULL.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE player_match_stats pms
+            SET    weather_id = w.weather_id
+            FROM   weather w
+            WHERE  w.match_id  = pms.match_id
+              AND  pms.weather_id IS NULL
+        """)
+        updated = cur.rowcount
+    conn.commit()
+    if updated:
+        logger.info("Backfilled weather_id on %d player_match_stats rows", updated)
+
+
+def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
+    """
+    Fetch and store weather for all matches without a weather row.
+    Backfills weather_id into player_match_stats afterwards.
+    Returns {match_id -> weather_id}.
     """
     if conn is None:
         conn = connect(DB_DSN)
@@ -240,30 +270,28 @@ def run(conn=None, max_concurrent: int = MAX_CONCURRENT) -> dict:
         """)
         pending_rows = cur.fetchall()
 
-    logger.info("Weather ingestion: %d matches need weather data", len(pending_rows))
+    logger.info("Weather: %d matches need data", len(pending_rows))
 
     work_items = []
     skipped    = 0
-    unresolved_stadiums: set[str] = set()
+    unresolved: set[str] = set()
 
     for match_id, match_date, stadium_name, lat, lng in pending_rows:
         coords = _resolve_coords(stadium_name, lat, lng)
         if coords is None:
-            unresolved_stadiums.add(stadium_name or "<null>")
+            unresolved.add(stadium_name or "<null>")
             skipped += 1
             continue
         work_items.append((match_id, coords[0], coords[1], str(match_date)))
 
-    if unresolved_stadiums:
-        logger.warning(
-            "  %d matches skipped -- no coords for stadiums: %s",
-            skipped,
-            sorted(unresolved_stadiums),
-        )
+    if unresolved:
+        logger.warning("No coordinates for %d stadium(s): %s",
+                       len(unresolved), sorted(unresolved))
 
-    logger.info("  %d fetchable, %d skipped (no coordinates)", len(work_items), skipped)
+    logger.info("  %d fetchable | %d skipped (no coordinates)", len(work_items), skipped)
 
     if not work_items:
+        _backfill_weather_ids(conn)
         with conn.cursor() as cur:
             cur.execute("SELECT match_id, weather_id FROM weather")
             return {mid: wid for mid, wid in cur.fetchall()}
@@ -284,13 +312,13 @@ def run(conn=None, max_concurrent: int = MAX_CONCURRENT) -> dict:
                 continue
             upsert_weather(conn, match_id, weather)
             inserted += 1
-            if inserted % 50 == 0:
+            if inserted % 100 == 0:
                 logger.info("  Weather progress: %d / %d", inserted, len(work_items))
 
-    logger.info(
-        "Weather ingestion complete: %d inserted, %d failed, %d skipped",
-        inserted, failed, skipped,
-    )
+    logger.info("Weather complete: %d inserted | %d failed | %d skipped",
+                inserted, failed, skipped)
+
+    _backfill_weather_ids(conn)
 
     with conn.cursor() as cur:
         cur.execute("SELECT match_id, weather_id FROM weather")
@@ -298,6 +326,5 @@ def run(conn=None, max_concurrent: int = MAX_CONCURRENT) -> dict:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    wc = run()
-    print(f"Weather cache: {len(wc)} entries")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    run()

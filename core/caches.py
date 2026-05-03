@@ -1,17 +1,11 @@
 """
 core/caches.py
 
-In-memory look-up caches for teams and players.
+In-memory caches for teams and players.
 
-Performance changes vs original
---------------------------------
-- get_or_create() no longer commits after every new row.
-  New rows are accumulated in a pending dict and flushed to the DB in a
-  single execute_values() + one commit when flush() is called.
-- The pipeline calls flush() once per match (teams) or once per
-  competition (players) -- caller controls granularity.
-- All reads are pure dict lookups (O(1)), zero DB round-trips for already-
-  seen entities.
+Column names follow the schema convention:
+  sb_team_id / sb_player_id   StatsBomb source identifiers
+  team_id / player_id         Internal surrogate PKs
 """
 
 from psycopg2.extras import execute_values
@@ -20,37 +14,51 @@ from core.utils import norm_name
 
 class TeamCache:
     def __init__(self, conn):
-        self.conn    = conn
-        self.cache   = {}        # statsbomb_team_id -> pg team_id
-        self._pending: dict[int, str] = {}   # sb_id -> name (not yet in DB)
+        self.conn     = conn
+        self.cache    = {}                        # sb_team_id -> team_id
+        self._pending: dict[int, str] = {}        # sb_team_id -> name
         self._load()
 
     def _load(self):
         with self.conn.cursor() as cur:
-            cur.execute("SELECT team_id, statsbomb_team_id FROM teams")
+            cur.execute("SELECT team_id, sb_team_id FROM teams")
             for tid, sid in cur.fetchall():
                 self.cache[sid] = tid
 
     def get_or_create(self, sb_id: int, name: str) -> int | None:
-        """Return pg team_id.  New teams are buffered until flush()."""
         if sb_id in self.cache:
+            # Update name in pending if we now have a real one
+            if name and sb_id in self._pending and not self._pending[sb_id]:
+                self._pending[sb_id] = name
             return self.cache[sb_id]
-        # Stage for batch insert; return sentinel None until flushed
-        self._pending[sb_id] = name
-        return None   # caller must call flush() before using the ID
+        # Only stage if we have a non-empty name, or haven't staged yet
+        if sb_id not in self._pending:
+            self._pending[sb_id] = name
+        elif name and not self._pending[sb_id]:
+            # Upgrade blank placeholder to real name
+            self._pending[sb_id] = name
+        return None
 
     def flush(self):
-        """Write all pending teams to DB in one round-trip."""
         if not self._pending:
             return
-        rows = [(name, sb_id) for sb_id, name in self._pending.items()]
+        # Filter out entries with no name — these are player-team registrations
+        # with blank names that will already be in cache from the home/away pass.
+        rows = [
+            (name or f"Team {sb_id}", sb_id)
+            for sb_id, name in self._pending.items()
+        ]
         with self.conn.cursor() as cur:
             execute_values(cur, """
-                INSERT INTO teams (team_name, statsbomb_team_id)
+                INSERT INTO teams (team_name, sb_team_id)
                 VALUES %s
-                ON CONFLICT (statsbomb_team_id)
-                DO UPDATE SET team_name = EXCLUDED.team_name
-                RETURNING team_id, statsbomb_team_id
+                ON CONFLICT (sb_team_id)
+                DO UPDATE SET team_name = CASE
+                    WHEN EXCLUDED.team_name = teams.team_name THEN teams.team_name
+                    WHEN teams.team_name LIKE 'Team %%'      THEN EXCLUDED.team_name
+                    ELSE teams.team_name
+                END
+                RETURNING team_id, sb_team_id
             """, rows)
             for tid, sid in cur.fetchall():
                 self.cache[sid] = tid
@@ -58,21 +66,20 @@ class TeamCache:
         self._pending.clear()
 
     def resolve(self, sb_id: int) -> int:
-        """Return pg team_id -- call only after flush()."""
         return self.cache[sb_id]
 
 
 class PlayerCache:
     def __init__(self, conn):
         self.conn  = conn
-        self.sb    = {}      # statsbomb_player_id -> pg player_id
-        self.norm  = {}      # norm_name           -> pg player_id
-        self._pending: dict[int, tuple[str, str]] = {}  # sb_id -> (name, nn)
+        self.sb    = {}   # sb_player_id -> player_id
+        self.norm  = {}   # norm_name    -> player_id
+        self._pending: dict[int, tuple[str, str]] = {}
         self._load()
 
     def _load(self):
         with self.conn.cursor() as cur:
-            cur.execute("SELECT player_id, statsbomb_player_id, norm_name FROM players")
+            cur.execute("SELECT player_id, sb_player_id, norm_name FROM players")
             for pid, sid, nn in cur.fetchall():
                 if sid:
                     self.sb[sid] = pid
@@ -80,14 +87,12 @@ class PlayerCache:
                     self.norm[nn] = pid
 
     def get_or_create(self, sb_id: int, name: str) -> int | None:
-        """Return pg player_id.  New players are buffered until flush()."""
         if sb_id in self.sb:
             return self.sb[sb_id]
 
         nn = norm_name(name)
         if nn in self.norm:
             pid = self.norm[nn]
-            # Back-fill statsbomb_player_id -- stage it, will be done in flush()
             self.sb[sb_id] = pid
             self._pending_backfill = getattr(self, "_pending_backfill", {})
             self._pending_backfill[sb_id] = pid
@@ -95,20 +100,18 @@ class PlayerCache:
 
         if sb_id not in self._pending:
             self._pending[sb_id] = (name, nn)
-        return None   # caller must call flush() before using the ID
+        return None
 
     def flush(self):
-        """Write all pending players to DB in one round-trip."""
-        # Back-fill statsbomb IDs for name-matched players
         backfill = getattr(self, "_pending_backfill", {})
         if backfill:
             with self.conn.cursor() as cur:
                 execute_values(cur, """
                     UPDATE players AS p
-                    SET statsbomb_player_id = v.sb_id
+                    SET sb_player_id = v.sb_id
                     FROM (VALUES %s) AS v(sb_id, player_id)
                     WHERE p.player_id = v.player_id
-                      AND p.statsbomb_player_id IS NULL
+                      AND p.sb_player_id IS NULL
                 """, [(sb_id, pid) for sb_id, pid in backfill.items()])
             self._pending_backfill = {}
 
@@ -120,18 +123,17 @@ class PlayerCache:
         rows = [(sb_id, name, nn) for sb_id, (name, nn) in self._pending.items()]
         with self.conn.cursor() as cur:
             execute_values(cur, """
-                INSERT INTO players (statsbomb_player_id, player_name, norm_name)
+                INSERT INTO players (sb_player_id, player_name, norm_name)
                 VALUES %s
-                ON CONFLICT (statsbomb_player_id) DO NOTHING
-                RETURNING player_id, statsbomb_player_id, norm_name
+                ON CONFLICT (sb_player_id) DO NOTHING
+                RETURNING player_id, sb_player_id, norm_name
             """, rows)
             for pid, sid, nn in cur.fetchall():
-                self.sb[sid]   = pid
-                self.norm[nn]  = pid
+                self.sb[sid]  = pid
+                self.norm[nn] = pid
 
         self.conn.commit()
         self._pending.clear()
 
     def resolve(self, sb_id: int) -> int:
-        """Return pg player_id -- call only after flush()."""
         return self.sb[sb_id]
