@@ -2,21 +2,6 @@
 utils/validate_schema.py
 
 Validate that the live PostgreSQL schema matches the expected DDL.
-
-Column names follow the renamed convention:
-  sb_*_id   StatsBomb source identifiers
-  tm_*_id   Transfermarkt source identifiers (INT, not TEXT)
-  *_id      Internal surrogate PKs
-
-Schema changes reflected:
-  - stadiums table added; matches references stadium_id (no stadium_name/lat/lng)
-  - player_match_features table added (computed ML columns separated from stats)
-  - player_match_stats loses days_since_last_injury, matches/minutes_last_30_days,
-    is_injured_next_30d
-  - players.tm_player_id is now INT (integer) not TEXT
-  - injuries has UNIQUE(player_id, injury_date, injury_type)
-  - pass_network_edges has UNIQUE(match_id, team_id, passer_id, receiver_id)
-  - weather.weather_condition has a CHECK constraint (validated separately)
 """
 
 import logging
@@ -44,6 +29,7 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
     warnings: List[str] = []
     errors:   List[str] = []
 
+    # Every table and column that must exist, with expected PG type.
     expected = {
         "teams": {
             "team_id":    "integer",
@@ -51,12 +37,14 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "sb_team_id": "integer",
         },
         "players": {
-            "player_id":    "integer",
-            "player_name":  "text",
-            "norm_name":    "text",
-            "sb_player_id": "integer",
-            "tm_player_id": "integer",    # changed from text -> int
-            "date_of_birth":"date",
+            "player_id":     "integer",
+            "player_name":   "text",
+            "norm_name":     "text",
+            "sb_player_id":  "integer",
+            "tm_player_id":  "integer",
+            "nationality":   "text",
+            "position":      "text",
+            "date_of_birth": "date",
         },
         "stadiums": {
             "stadium_id":   "integer",
@@ -65,16 +53,16 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "stadium_lng":  "double precision",
         },
         "matches": {
-            "match_id":    "integer",
-            "sb_match_id": "integer",
-            "match_date":  "date",
-            "home_team_id":"integer",
-            "away_team_id":"integer",
-            "home_score":  "integer",
-            "away_score":  "integer",
-            "competition": "text",
-            "season":      "text",
-            "stadium_id":  "integer",     # replaces stadium_name/lat/lng
+            "match_id":     "integer",
+            "sb_match_id":  "integer",
+            "match_date":   "date",
+            "home_team_id": "integer",
+            "away_team_id": "integer",
+            "home_score":   "integer",
+            "away_score":   "integer",
+            "competition":  "text",
+            "season":       "text",
+            "stadium_id":   "integer",
         },
         "weather": {
             "weather_id":       "integer",
@@ -86,41 +74,42 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "weather_condition":"text",
         },
         "injuries": {
-            "injury_id":  "integer",
-            "player_id":  "integer",
-            "injury_date":"date",
-            "return_date":"date",
+            "injury_id":     "integer",
+            "player_id":     "integer",
+            "injury_type":   "text",
+            "injury_date":   "date",
+            "return_date":   "date",
+            "matches_missed":"integer",
+            "season":        "text",
         },
         "player_match_stats": {
-            "stat_id":               "integer",
-            "player_id":             "integer",
-            "match_id":              "integer",
-            "team_id":               "integer",
-            "weather_id":            "integer",
-            "result":                "text",
-            "goals":                 "integer",
-            "assists":               "integer",
-            "shots":                 "integer",
-            "xg":                    "double precision",
-            "xa":                    "double precision",
-            "key_passes":            "integer",
-            "passes_attempted":      "integer",
-            "passes_completed":      "integer",
-            "pass_accuracy":         "double precision",
-            "progressive_passes":    "integer",
-            "carry_distance":        "double precision",
-            "progressive_carries":   "integer",
-            "dribbles_completed":    "integer",
-            "tackles":               "integer",
-            "interceptions":         "integer",
-            "clearances":            "integer",
-            "pressures":             "integer",
-            "yellow_cards":          "integer",
-            "red_cards":             "integer",
-            "minutes_played":        "integer",
-            "sub_minute":            "integer",
-            # NOTE: days_since_last_injury, matches/minutes_last_30_days,
-            # and is_injured_next_30d are now in player_match_features.
+            "stat_id":           "integer",
+            "player_id":         "integer",
+            "match_id":          "integer",
+            "team_id":           "integer",
+            "weather_id":        "integer",
+            "result":            "text",
+            "goals":             "integer",
+            "assists":           "integer",
+            "shots":             "integer",
+            "xg":                "double precision",
+            "xa":                "double precision",
+            "key_passes":        "integer",
+            "passes_attempted":  "integer",
+            "passes_completed":  "integer",
+            "pass_accuracy":     "double precision",
+            "progressive_passes":"integer",
+            "carry_distance":    "double precision",
+            "progressive_carries":"integer",
+            "dribbles_completed":"integer",
+            "tackles":           "integer",
+            "interceptions":     "integer",
+            "clearances":        "integer",
+            "pressures":         "integer",
+            "yellow_cards":      "integer",
+            "red_cards":         "integer",
+            "minutes_played":    "integer",
+            "sub_minute":        "integer",
         },
         "player_match_features": {
             "feature_id":            "integer",
@@ -133,30 +122,45 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "is_injured_next_30d":   "boolean",
         },
         "pass_network_edges": {
-            "edge_id":    "integer",
-            "match_id":   "integer",
-            "team_id":    "integer",
-            "passer_id":  "integer",
-            "receiver_id":"integer",
-            "pass_count": "integer",
-            "avg_x_start":"double precision",
-            "avg_y_start":"double precision",
-            "avg_x_end":  "double precision",
-            "avg_y_end":  "double precision",
+            "edge_id":     "integer",
+            "match_id":    "integer",
+            "team_id":     "integer",
+            "passer_id":   "integer",
+            "receiver_id": "integer",
+            "pass_count":  "integer",
+            "avg_x_start": "double precision",
+            "avg_y_start": "double precision",
+            "avg_x_end":   "double precision",
+            "avg_y_end":   "double precision",
         },
     }
 
-    # Columns that were removed from player_match_stats (to catch stale schemas)
-    removed_from_pms = {
-        "days_since_last_injury",
-        "matches_last_30_days",
-        "minutes_last_30_days",
-        "is_injured_next_30d",
-        "stadium_name",   # moved to stadiums / matches.stadium_id
+    # Columns that were removed and should no longer exist anywhere.
+    stale = {
+        "teams":              {"country"},
+        "matches":            {"stadium_name", "stadium_lat", "stadium_lng"},
+        "player_match_stats": {
+            "days_since_last_injury",
+            "matches_last_30_days",
+            "minutes_last_30_days",
+            "is_injured_next_30d",
+        },
+    }
+
+    # UNIQUE constraints: table -> minimum expected count.
+    unique_constraints = {
+        "player_match_stats":    1,   # (player_id, match_id)
+        "player_match_features": 2,   # (stat_id) + (player_id, match_id)
+        "injuries":              1,   # (player_id, injury_date, injury_type)
+        "pass_network_edges":    1,   # (match_id, team_id, passer_id, receiver_id)
     }
 
     try:
         with conn.cursor() as cur:
+
+            # ------------------------------------------------------------------
+            # 1. Column presence and type
+            # ------------------------------------------------------------------
             for table, cols in expected.items():
                 cur.execute("""
                     SELECT column_name, data_type
@@ -177,70 +181,69 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                             f"{table}.{col}: expected {exp_type}, got {existing[col]}"
                         )
 
-            # Check that old columns are gone from player_match_stats
-            cur.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'player_match_stats'
-            """)
-            pms_cols = {r[0] for r in cur.fetchall()}
-            for stale in removed_from_pms & pms_cols:
-                warnings.append(
-                    f"player_match_stats.{stale} still present — "
-                    f"should have been moved to player_match_features or stadiums"
-                )
+            # ------------------------------------------------------------------
+            # 2. Stale columns that should have been dropped
+            # ------------------------------------------------------------------
+            for table, cols in stale.items():
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s
+                """, (table,))
+                present = {r[0] for r in cur.fetchall()}
+                for col in cols & present:
+                    warnings.append(f"{table}.{col} should have been dropped")
 
-            # Check that old columns are gone from matches
-            cur.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = 'matches'
-            """)
-            match_cols = {r[0] for r in cur.fetchall()}
-            for stale in {"stadium_name", "stadium_lat", "stadium_lng"} & match_cols:
-                warnings.append(
-                    f"matches.{stale} still present — moved to stadiums table"
-                )
-
-            # Unique constraint checks
-            for tbl, expected_count, label in [
-                ("player_match_stats",    1, "UNIQUE(player_id, match_id)"),
-                ("player_match_features", 1, "UNIQUE(player_id, match_id)"),
-                ("pass_network_edges",    1, "UNIQUE(match_id, team_id, passer_id, receiver_id)"),
-                ("injuries",              1, "UNIQUE(player_id, injury_date, injury_type)"),
-            ]:
+            # ------------------------------------------------------------------
+            # 3. UNIQUE constraints
+            # ------------------------------------------------------------------
+            for table, min_count in unique_constraints.items():
                 cur.execute("""
                     SELECT COUNT(*) FROM information_schema.table_constraints
-                    WHERE table_name = %s AND constraint_type = 'UNIQUE'
-                """, (tbl,))
+                    WHERE table_schema = 'public'
+                      AND table_name = %s
+                      AND constraint_type = 'UNIQUE'
+                """, (table,))
                 count = cur.fetchone()[0]
-                if count < expected_count:
-                    errors.append(f"{tbl} missing {label}")
+                if count < min_count:
+                    errors.append(
+                        f"{table}: expected >= {min_count} UNIQUE constraint(s), found {count}"
+                    )
 
-            # CHECK constraint on weather.weather_condition
+            # ------------------------------------------------------------------
+            # 4. CHECK constraint on weather.weather_condition
+            # Uses pg_constraint to avoid information_schema join issues.
+            # ------------------------------------------------------------------
             cur.execute("""
-                SELECT COUNT(*) FROM information_schema.check_constraints cc
-                JOIN information_schema.constraint_column_usage cu
-                  ON cu.constraint_name = cc.constraint_name
-                WHERE cu.table_name  = 'weather'
-                  AND cu.column_name = 'weather_condition'
+                SELECT COUNT(*)
+                FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_attribute a ON a.attrelid = t.oid
+                    AND a.attnum = ANY(c.conkey)
+                WHERE t.relname  = 'weather'
+                  AND a.attname  = 'weather_condition'
+                  AND c.contype  = 'c'
             """)
             if cur.fetchone()[0] == 0:
                 warnings.append(
                     "weather.weather_condition has no CHECK constraint"
                 )
 
-            # Orphan checks
-            for fk_table, fk_col, ref_table, ref_col in [
-                ("player_match_stats",    "player_id", "players", "player_id"),
-                ("player_match_stats",    "match_id",  "matches", "match_id"),
-                ("player_match_stats",    "team_id",   "teams",   "team_id"),
+            # ------------------------------------------------------------------
+            # 5. Referential integrity (orphan row counts)
+            # ------------------------------------------------------------------
+            orphan_checks = [
+                ("player_match_stats",    "player_id", "players",            "player_id"),
+                ("player_match_stats",    "match_id",  "matches",            "match_id"),
+                ("player_match_stats",    "team_id",   "teams",              "team_id"),
                 ("player_match_features", "stat_id",   "player_match_stats", "stat_id"),
-                ("player_match_features", "player_id", "players", "player_id"),
-                ("player_match_features", "match_id",  "matches", "match_id"),
-                ("injuries",              "player_id", "players", "player_id"),
-                ("matches",               "stadium_id","stadiums","stadium_id"),
-            ]:
+                ("player_match_features", "player_id", "players",            "player_id"),
+                ("player_match_features", "match_id",  "matches",            "match_id"),
+                ("injuries",              "player_id", "players",            "player_id"),
+                ("matches",               "stadium_id","stadiums",           "stadium_id"),
+                ("weather",               "match_id",  "matches",            "match_id"),
+                ("pass_network_edges",    "match_id",  "matches",            "match_id"),
+            ]
+            for fk_table, fk_col, ref_table, ref_col in orphan_checks:
                 cur.execute(f"""
                     SELECT COUNT(*) FROM {fk_table} f
                     LEFT JOIN {ref_table} r ON r.{ref_col} = f.{fk_col}
@@ -249,15 +252,14 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                 orphans = cur.fetchone()[0]
                 if orphans:
                     warnings.append(
-                        f"{fk_table}.{fk_col}: {orphans} orphaned rows"
+                        f"{fk_table}.{fk_col}: {orphans} orphaned row(s)"
                     )
 
         success = len(errors) == 0
         if success:
             logger.info("Schema validation passed")
-        else:
-            for e in errors:
-                logger.error("Schema error: %s", e)
+        for e in errors:
+            logger.error("Schema error: %s", e)
         for w in warnings:
             logger.warning("Schema warning: %s", w)
 

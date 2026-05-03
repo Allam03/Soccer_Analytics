@@ -13,8 +13,7 @@
 CREATE TABLE IF NOT EXISTS teams (
     team_id         SERIAL  PRIMARY KEY,
     team_name       TEXT    NOT NULL,
-    country         TEXT,
-    sb_team_id      INT     UNIQUE NOT NULL   -- StatsBomb team identifier
+    sb_team_id      INT     UNIQUE NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_teams_sb ON teams (sb_team_id);
@@ -25,8 +24,8 @@ CREATE INDEX IF NOT EXISTS idx_teams_sb ON teams (sb_team_id);
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS players (
     player_id       SERIAL  PRIMARY KEY,
-    sb_player_id    INT     UNIQUE,           -- StatsBomb player identifier
-    tm_player_id    INT,                      -- Transfermarkt player identifier (INT)
+    sb_player_id    INT     UNIQUE,
+    tm_player_id    INT,
     player_name     TEXT    NOT NULL,
     norm_name       TEXT,
     nationality     TEXT,
@@ -34,13 +33,13 @@ CREATE TABLE IF NOT EXISTS players (
     date_of_birth   DATE
 );
 
-CREATE INDEX IF NOT EXISTS idx_players_sb           ON players (sb_player_id);
-CREATE INDEX IF NOT EXISTS idx_players_norm_name    ON players (norm_name);
-CREATE INDEX IF NOT EXISTS idx_players_tm           ON players (tm_player_id);
+CREATE INDEX IF NOT EXISTS idx_players_sb        ON players (sb_player_id);
+CREATE INDEX IF NOT EXISTS idx_players_norm_name ON players (norm_name);
+CREATE INDEX IF NOT EXISTS idx_players_tm        ON players (tm_player_id);
 
 
 -- -----------------------------------------------------------------------------
--- STADIUMS  (extracted from matches)
+-- STADIUMS
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS stadiums (
     stadium_id      SERIAL  PRIMARY KEY,
@@ -57,10 +56,10 @@ CREATE INDEX IF NOT EXISTS idx_stadiums_name ON stadiums (stadium_name);
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS matches (
     match_id        SERIAL  PRIMARY KEY,
-    sb_match_id     INT     UNIQUE NOT NULL,  -- StatsBomb match identifier
+    sb_match_id     INT     UNIQUE NOT NULL,
     match_date      DATE,
-    home_team_id    INT     REFERENCES teams   (team_id),
-    away_team_id    INT     REFERENCES teams   (team_id),
+    home_team_id    INT     REFERENCES teams    (team_id),
+    away_team_id    INT     REFERENCES teams    (team_id),
     home_score      INT,
     away_score      INT,
     competition     TEXT,
@@ -68,12 +67,12 @@ CREATE TABLE IF NOT EXISTS matches (
     stadium_id      INT     REFERENCES stadiums (stadium_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_matches_date         ON matches (match_date);
-CREATE INDEX IF NOT EXISTS idx_matches_competition  ON matches (competition, season);
-CREATE INDEX IF NOT EXISTS idx_matches_home_team    ON matches (home_team_id);
-CREATE INDEX IF NOT EXISTS idx_matches_away_team    ON matches (away_team_id);
-CREATE INDEX IF NOT EXISTS idx_matches_sb           ON matches (sb_match_id);
-CREATE INDEX IF NOT EXISTS idx_matches_stadium      ON matches (stadium_id);
+CREATE INDEX IF NOT EXISTS idx_matches_date        ON matches (match_date);
+CREATE INDEX IF NOT EXISTS idx_matches_competition ON matches (competition, season);
+CREATE INDEX IF NOT EXISTS idx_matches_home_team   ON matches (home_team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_away_team   ON matches (away_team_id);
+CREATE INDEX IF NOT EXISTS idx_matches_sb          ON matches (sb_match_id);
+CREATE INDEX IF NOT EXISTS idx_matches_stadium     ON matches (stadium_id);
 
 
 -- -----------------------------------------------------------------------------
@@ -113,7 +112,7 @@ CREATE INDEX IF NOT EXISTS idx_injuries_dates  ON injuries (injury_date, return_
 
 
 -- -----------------------------------------------------------------------------
--- PLAYER MATCH STATS  (one row per player x match — raw event aggregates only)
+-- PLAYER MATCH STATS  (raw event aggregates, one row per player x match)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS player_match_stats (
     stat_id                 SERIAL  PRIMARY KEY,
@@ -122,10 +121,8 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
     team_id                 INT             REFERENCES teams    (team_id),
     weather_id              INT             REFERENCES weather  (weather_id),
 
-    -- match context
-    result                  TEXT,           -- 'win' | 'draw' | 'loss'
+    result                  TEXT,
 
-    -- attacking
     goals                   INT     DEFAULT 0,
     assists                 INT     DEFAULT 0,
     shots                   INT     DEFAULT 0,
@@ -133,49 +130,40 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
     xa                      FLOAT   DEFAULT 0,
     key_passes              INT     DEFAULT 0,
 
-    -- passing
     passes_attempted        INT     DEFAULT 0,
     passes_completed        INT     DEFAULT 0,
     pass_accuracy           FLOAT   DEFAULT 0,
     progressive_passes      INT     DEFAULT 0,
 
-    -- carrying
     carry_distance          FLOAT   DEFAULT 0,
     progressive_carries     INT     DEFAULT 0,
 
-    -- dribbling
     dribbles_completed      INT     DEFAULT 0,
 
-    -- defending
     tackles                 INT     DEFAULT 0,
     interceptions           INT     DEFAULT 0,
     clearances              INT     DEFAULT 0,
     pressures               INT     DEFAULT 0,
 
-    -- discipline
     yellow_cards            INT     DEFAULT 0,
     red_cards               INT     DEFAULT 0,
 
-    -- minutes / workload
     minutes_played          INT     DEFAULT 0,
-    sub_minute              INT,            -- NULL = not substituted off
+    sub_minute              INT,
 
     UNIQUE (player_id, match_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_pms_player   ON player_match_stats (player_id);
-CREATE INDEX IF NOT EXISTS idx_pms_match    ON player_match_stats (match_id);
-CREATE INDEX IF NOT EXISTS idx_pms_team     ON player_match_stats (team_id);
-CREATE INDEX IF NOT EXISTS idx_pms_weather  ON player_match_stats (weather_id);
--- Composite indexes for common ML query patterns
+CREATE INDEX IF NOT EXISTS idx_pms_player       ON player_match_stats (player_id);
+CREATE INDEX IF NOT EXISTS idx_pms_match        ON player_match_stats (match_id);
+CREATE INDEX IF NOT EXISTS idx_pms_team         ON player_match_stats (team_id);
+CREATE INDEX IF NOT EXISTS idx_pms_weather      ON player_match_stats (weather_id);
 CREATE INDEX IF NOT EXISTS idx_pms_player_match ON player_match_stats (player_id, match_id);
 CREATE INDEX IF NOT EXISTS idx_pms_team_match   ON player_match_stats (team_id,   match_id);
 
 
 -- -----------------------------------------------------------------------------
 -- PLAYER MATCH FEATURES  (computed ML columns, one row per player x match)
--- Separated from player_match_stats so compute_labels can UPDATE without
--- touching the raw event aggregates.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS player_match_features (
     feature_id              SERIAL  PRIMARY KEY,
@@ -183,28 +171,23 @@ CREATE TABLE IF NOT EXISTS player_match_features (
     player_id               INT     NOT NULL REFERENCES players (player_id),
     match_id                INT     NOT NULL REFERENCES matches  (match_id),
 
-    -- workload features (compute_labels stage 1)
     matches_last_30_days    INT     DEFAULT 0,
     minutes_last_30_days    INT     DEFAULT 0,
-
-    -- injury history (compute_labels stage 2)
-    days_since_last_injury  INT,            -- NULL = no prior injury on record
-
-    -- ML target label for Model 3 (compute_labels stage 3)
+    days_since_last_injury  INT,
     is_injured_next_30d     BOOLEAN DEFAULT FALSE,
 
     UNIQUE (player_id, match_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_pmf_stat     ON player_match_features (stat_id);
-CREATE INDEX IF NOT EXISTS idx_pmf_player   ON player_match_features (player_id);
-CREATE INDEX IF NOT EXISTS idx_pmf_match    ON player_match_features (match_id);
-CREATE INDEX IF NOT EXISTS idx_pmf_label    ON player_match_features (is_injured_next_30d)
+CREATE INDEX IF NOT EXISTS idx_pmf_stat   ON player_match_features (stat_id);
+CREATE INDEX IF NOT EXISTS idx_pmf_player ON player_match_features (player_id);
+CREATE INDEX IF NOT EXISTS idx_pmf_match  ON player_match_features (match_id);
+CREATE INDEX IF NOT EXISTS idx_pmf_label  ON player_match_features (is_injured_next_30d)
     WHERE is_injured_next_30d = TRUE;
 
 
 -- -----------------------------------------------------------------------------
--- PASS NETWORK EDGES  (aggregated passer -> receiver counts per match)
+-- PASS NETWORK EDGES
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pass_network_edges (
     edge_id         SERIAL  PRIMARY KEY,
