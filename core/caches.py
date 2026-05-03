@@ -15,8 +15,9 @@ from core.utils import norm_name
 class TeamCache:
     def __init__(self, conn):
         self.conn     = conn
-        self.cache    = {}                        # sb_team_id -> team_id
-        self._pending: dict[int, str] = {}        # sb_team_id -> name
+        self.cache    = {}   # sb_team_id -> team_id
+        # pending: sb_team_id -> {"name": str, "country": str | None}
+        self._pending: dict[int, dict] = {}
         self._load()
 
     def _load(self):
@@ -25,39 +26,49 @@ class TeamCache:
             for tid, sid in cur.fetchall():
                 self.cache[sid] = tid
 
-    def get_or_create(self, sb_id: int, name: str) -> int | None:
+    def get_or_create(self, sb_id: int, name: str, country: str | None = None) -> int | None:
         if sb_id in self.cache:
-            # Update name in pending if we now have a real one
-            if name and sb_id in self._pending and not self._pending[sb_id]:
-                self._pending[sb_id] = name
+            # Opportunistically upgrade country on already-flushed rows
+            if country and sb_id not in self._pending:
+                self._pending[sb_id] = {"name": name, "country": country}
             return self.cache[sb_id]
-        # Only stage if we have a non-empty name, or haven't staged yet
+
         if sb_id not in self._pending:
-            self._pending[sb_id] = name
-        elif name and not self._pending[sb_id]:
-            # Upgrade blank placeholder to real name
-            self._pending[sb_id] = name
+            self._pending[sb_id] = {"name": name, "country": country}
+        else:
+            entry = self._pending[sb_id]
+            # Upgrade blank name placeholder to a real name
+            if name and not entry["name"]:
+                entry["name"] = name
+            # Fill in country if we now have it
+            if country and not entry["country"]:
+                entry["country"] = country
         return None
 
     def flush(self):
         if not self._pending:
             return
-        # Filter out entries with no name — these are player-team registrations
-        # with blank names that will already be in cache from the home/away pass.
+
         rows = [
-            (name or f"Team {sb_id}", sb_id)
-            for sb_id, name in self._pending.items()
+            (entry["name"] or f"Team {sb_id}", entry.get("country"), sb_id)
+            for sb_id, entry in self._pending.items()
         ]
+
         with self.conn.cursor() as cur:
             execute_values(cur, """
-                INSERT INTO teams (team_name, sb_team_id)
+                INSERT INTO teams (team_name, country, sb_team_id)
                 VALUES %s
                 ON CONFLICT (sb_team_id)
-                DO UPDATE SET team_name = CASE
-                    WHEN EXCLUDED.team_name = teams.team_name THEN teams.team_name
-                    WHEN teams.team_name LIKE 'Team %%'      THEN EXCLUDED.team_name
-                    ELSE teams.team_name
-                END
+                DO UPDATE SET
+                    team_name = CASE
+                        WHEN EXCLUDED.team_name = teams.team_name THEN teams.team_name
+                        WHEN teams.team_name LIKE 'Team %%'       THEN EXCLUDED.team_name
+                        ELSE teams.team_name
+                    END,
+                    country = CASE
+                        WHEN teams.country IS NULL THEN EXCLUDED.country
+                        ELSE teams.country
+                    END
                 RETURNING team_id, sb_team_id
             """, rows)
             for tid, sid in cur.fetchall():

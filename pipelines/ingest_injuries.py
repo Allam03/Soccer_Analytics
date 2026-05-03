@@ -276,7 +276,7 @@ def ingest_injuries(conn, injuries_csv, tm_id_map):
         logger.error("tm_id_map is empty — Pass 1 matched 0 players")
         return
 
-    for col in ("date_from", "date_until"):
+    for col in ("from", "until"):
         if col in df.columns:
             df[col] = _parse_dates(df[col])
 
@@ -295,8 +295,10 @@ def ingest_injuries(conn, injuries_csv, tm_id_map):
             continue
 
         matched += 1
-        date_from  = row.get("date_from")
-        date_until = row.get("date_until")
+        date_from  = row.get("from")
+        date_until = row.get("until")
+        if not date_from or not date_until:
+            logger.warning("Injury row with missing dates: %s", row.to_dict())
         rows.append((
             tm_id_map[tm_id],
             str(row.get("injury") or "").strip() or None,
