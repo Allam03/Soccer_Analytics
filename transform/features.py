@@ -2,40 +2,6 @@
 transform/features.py
 
 Vectorised per-player feature aggregation for one match.
-
-xa fix
-------
-StatsBomb open data does not include an 'xA' field directly on the pass dict
-in the way the commercial feed does.  In the open data, expected assists are
-derived by looking at passes that preceded a shot and using the shot's
-statsbomb_xg as the xA value for the passer.
-
-Approach:
-1. Build a mapping from (shot event index) -> xg for all shot events.
-2. For each completed pass, look up the next shot event in the same
-   possession sequence using the 'shot_assist' flag or by checking whether
-   the very next shot event belongs to the same possession.  If found,
-   assign that shot's xg as the pass's xA contribution.
-
-Simpler approximation used here (avoids tracking possession chains):
-- A pass with shot_assist=True is a key pass.
-- Its xA is set to the average xg of all shots in the match weighted by
-  the pass location distance to goal -- this is an approximation.
-- A pass with goal_assist=True gets xA = 1.0 (the goal happened).
-
-Actually the cleanest and most accurate approach for open data:
-StatsBomb stores 'shot_assist': True on the pass, and separately stores
-the shot's statsbomb_xg.  We can match them via the 'related_events' list
-on each event.  However, related_events requires iterating pairs.
-
-Practical fix: use the 'through_ball', 'switch', 'cross', and technique
-flags to detect key passes, and for xA use the shot xg of shots that
-immediately follow (within the same team's possession, next 2 events).
-This is what most open-data pipelines do.
-
-For correctness we use: if pass has shot_assist flag -> find the linked
-shot via related_events and assign its xg as xa.  Falls back to 0 if
-related_events is missing (older spec).
 """
 
 import math
@@ -92,79 +58,70 @@ def extract_team_id_col(events: pd.DataFrame) -> pd.Series:
     )
 
 
-def _build_xa_map(events: pd.DataFrame) -> dict:
+def _build_xa_map(events: pd.DataFrame) -> dict[int, float]:
     """
-    Build {event_uuid -> xa_value} for all passes that assisted a shot.
+    Build {pass_event_index -> xa} using the direct StatsBomb link:
+        pass.assisted_shot_id  ->  shot event uuid  ->  shot.statsbomb_xg
 
-    Strategy: for each shot event, check its 'related_events' list.
-    Any UUID in that list that belongs to a Pass event is the key pass;
-    assign the shot's statsbomb_xg as xa for that pass.
+    This is a two-step vectorised lookup with no related_events traversal
+    and no heuristic fallbacks.
 
-    Falls back to the 'xA' field on the pass dict if present (commercial feed).
-    Returns a dict from event index (integer) to xa float.
+    Fallback for older spec rows where goal_assist=True but assisted_shot_id
+    is absent: use the mean xG of all shots in the match (not 1.0), since we
+    know a goal occurred but cannot identify the exact shot.
     """
-    # Build uuid -> (index, type_name, xg) for shots
-    shot_by_uuid: dict[str, float] = {}
-    pass_idx_by_uuid: dict[str, int] = {}
+    type_col = events["type"].map(
+        lambda t: t.get("name") if isinstance(t, dict) else (t or "")
+    )
 
-    for idx, row in events.iterrows():
-        t = row.get("type")
-        t_name = t.get("name") if isinstance(t, dict) else t
+    # ------------------------------------------------------------------
+    # Step 1: {shot_uuid -> xg} — vectorised, no iterrows
+    # ------------------------------------------------------------------
+    is_shot = type_col == "Shot"
+    shot_xg_dict: dict[str, float] = {}
 
-        uid = row.get("id")  # StatsBomb event UUID
+    if is_shot.any():
+        shot_rows = events.loc[is_shot]
+        uids = shot_rows["id"]
+        xgs  = shot_rows["shot"].map(
+            lambda s: float(s.get("statsbomb_xg") or 0.0) if isinstance(s, dict) else 0.0
+        )
+        shot_xg_dict = dict(zip(uids, xgs))
 
-        if t_name == "Shot":
-            shot_data = row.get("shot") or {}
-            xg = shot_data.get("statsbomb_xg") or 0.0
-            if uid:
-                shot_by_uuid[uid] = xg
-            # Also register related events pointing back to the assist pass
-            related = row.get("related_events") or []
-            for rel_uid in related:
-                # We'll resolve these below
-                shot_by_uuid.setdefault(f"__shot_for_{rel_uid}", xg)
+    mean_shot_xg: float = float(np.mean(list(shot_xg_dict.values()))) if shot_xg_dict else 0.0
 
-        if t_name == "Pass":
-            if uid:
-                pass_idx_by_uuid[uid] = idx
-
-    # Build the xa_map: pass_index -> xa
+    # ------------------------------------------------------------------
+    # Step 2: {pass_index -> xa} via pass.assisted_shot_id
+    # ------------------------------------------------------------------
+    is_pass = type_col == "Pass"
     xa_map: dict[int, float] = {}
 
-    for idx, row in events.iterrows():
-        t = row.get("type")
-        t_name = t.get("name") if isinstance(t, dict) else t
-        if t_name != "Pass":
-            continue
+    if not is_pass.any():
+        return xa_map
 
-        pass_dict = row.get("pass") or {}
+    pass_rows = events.loc[is_pass]
 
-        # Method 1: explicit xA field (commercial feed)
-        explicit_xa = pass_dict.get("xA")
-        if explicit_xa is not None:
-            xa_map[idx] = float(explicit_xa)
-            continue
+    # Extract assisted_shot_id from each pass dict (None when absent)
+    assisted_shot_ids = pass_rows["pass"].map(
+        lambda p: p.get("assisted_shot_id") if isinstance(p, dict) else None
+    )
 
-        # Method 2: related_events on this pass -> find linked shot xg
-        uid = row.get("id")
-        if uid:
-            shot_xg = shot_by_uuid.get(f"__shot_for_{uid}")
-            if shot_xg is not None:
-                xa_map[idx] = shot_xg
-                continue
+    # Direct lookup: pass index -> xg of the linked shot
+    for idx, shot_uuid in assisted_shot_ids.dropna().items():
+        xg = shot_xg_dict.get(shot_uuid)
+        if xg is not None:
+            xa_map[idx] = xg
 
-        # Method 3: shot_assist flag -> use related_events on the shot side
-        if pass_dict.get("shot_assist") or pass_dict.get("goal_assist"):
-            related = row.get("related_events") or []
-            for rel_uid in related:
-                xg = shot_by_uuid.get(rel_uid)
-                if xg is not None:
-                    xa_map[idx] = xg
-                    break
-            else:
-                # goal_assist but no linked xg found: use 1.0 as proxy
-                if pass_dict.get("goal_assist"):
-                    xa_map[idx] = 1.0
+    # ------------------------------------------------------------------
+    # Fallback: goal_assist=True with no assisted_shot_id (older spec)
+    # Use mean match xG — not 1.0 — to avoid systematic overestimation.
+    # ------------------------------------------------------------------
+    goal_assist_flags = pass_rows["pass"].map(
+        lambda p: bool(p.get("goal_assist")) if isinstance(p, dict) else False
+    )
+    for idx in goal_assist_flags[goal_assist_flags].index:
+        if idx not in xa_map:
+            xa_map[idx] = mean_shot_xg
 
     return xa_map
 
@@ -180,7 +137,7 @@ def agg_match_by_player(
     ev = ev.dropna(subset=["_player_id"])
     ev["_player_id"] = ev["_player_id"].astype(int)
 
-    # Build xa map once per match (uses all events including shots)
+    # Build xa map once per match across all events (shots and passes both needed)
     xa_map = _build_xa_map(events)
 
     result: dict[int, dict] = {}
@@ -229,7 +186,7 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int, xa_map: dict) -> dict:
             lambda p: bool(p.get("shot_assist") or p.get("goal_assist"))
         ).sum())
 
-        # xa: sum from pre-built xa_map (indexed by event dataframe index)
+        # xa: sum xa_map values for this player's pass event indices only
         xa = float(sum(xa_map.get(idx, 0.0) for idx in pe.loc[is_pass].index))
 
         start_locs = pe.loc[is_pass, "location"]
