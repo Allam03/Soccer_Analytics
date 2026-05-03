@@ -1,23 +1,24 @@
 """
 pipelines/compute_labels.py
 
-Post-ingestion SQL passes that compute derived columns in player_match_stats.
+Post-ingestion SQL passes that compute derived ML columns.
 
-Workload fix
-------------
-The original query used:
-    LEFT JOIN player_match_stats pms_inner ON pms_inner.player_id = ...
-    LEFT JOIN matches m_inner ON m_inner.match_id = pms_inner.match_id
-        AND m_inner.match_date >= ...
+Schema change
+-------------
+Computed columns (matches_last_30_days, minutes_last_30_days,
+days_since_last_injury, is_injured_next_30d) have moved from
+player_match_stats to the separate player_match_features table.
 
-The date filter on the JOIN condition filters which m_inner rows ATTACH to
-each pms_inner row, but pms_inner itself is still included in the result set
-— COUNT(pms_inner.stat_id) counts every pms_inner row regardless of whether
-its m_inner date fell in the window.  This produced values like 219.
+This pipeline now:
+  1. Ensures a player_match_features row exists for every player_match_stats
+     row (INSERT … ON CONFLICT DO NOTHING).
+  2. UPDATEs player_match_features for the three computed label passes.
 
-Fix: move the date range filter into a WHERE condition, or rewrite as a
-correlated subquery so only in-window matches are counted.  The correlated
-subquery approach is cleaner and avoids the LEFT JOIN ambiguity.
+Workload fix (unchanged logic)
+------------------------------
+The original query used a LEFT JOIN with the date filter on the ON clause,
+which caused counts outside the window to still be included.  The correlated
+subquery approach used here avoids this by filtering inside a WHERE clause.
 """
 
 import logging
@@ -27,21 +28,40 @@ from config.settings import DB_DSN
 logger = logging.getLogger(__name__)
 
 
+def _ensure_feature_rows(conn):
+    """
+    Insert a player_match_features row for every player_match_stats row
+    that doesn't have one yet.  Safe to re-run (ON CONFLICT DO NOTHING).
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO player_match_features (stat_id, player_id, match_id)
+            SELECT stat_id, player_id, match_id
+            FROM   player_match_stats
+            ON CONFLICT (player_id, match_id) DO NOTHING
+        """)
+        inserted = cur.rowcount
+    conn.commit()
+    if inserted:
+        logger.info("player_match_features: %d new rows scaffolded", inserted)
+
+
 def compute_injury_label(conn):
     """Set is_injured_next_30d = TRUE where an injury follows within 30 days."""
     with conn.cursor() as cur:
         cur.execute("""
-            UPDATE player_match_stats pms
+            UPDATE player_match_features pmf
             SET    is_injured_next_30d = TRUE
-            WHERE EXISTS (
+            FROM   player_match_stats pms
+            JOIN   matches m ON m.match_id = pms.match_id
+            WHERE  pmf.stat_id = pms.stat_id
+              AND  EXISTS (
                 SELECT 1
-                FROM matches m
-                JOIN injuries i
-                ON i.player_id = pms.player_id
-                WHERE m.match_id = pms.match_id
-                AND i.injury_date >= m.match_date
-                AND i.injury_date <= m.match_date + INTERVAL '30 days'
-            );
+                FROM injuries i
+                WHERE i.player_id    = pms.player_id
+                  AND i.injury_date >= m.match_date
+                  AND i.injury_date <= m.match_date + INTERVAL '30 days'
+              );
         """)
         updated = cur.rowcount
     conn.commit()
@@ -52,7 +72,7 @@ def compute_days_since_last_injury(conn):
     """Days between each match and the player's most recent prior return_date."""
     with conn.cursor() as cur:
         cur.execute("""
-            UPDATE player_match_stats pms
+            UPDATE player_match_features pmf
             SET    days_since_last_injury = sub.days_since
             FROM (
                 SELECT
@@ -64,7 +84,7 @@ def compute_days_since_last_injury(conn):
                 WHERE i.return_date < m2.match_date
                 GROUP BY pms2.stat_id, m2.match_date
             ) sub
-            WHERE pms.stat_id = sub.stat_id
+            WHERE pmf.stat_id = sub.stat_id
         """)
         updated = cur.rowcount
     conn.commit()
@@ -80,7 +100,7 @@ def compute_workload(conn):
     """
     with conn.cursor() as cur:
         cur.execute("""
-            UPDATE player_match_stats pms
+            UPDATE player_match_features pmf
             SET
                 matches_last_30_days = sub.match_count,
                 minutes_last_30_days = sub.minute_sum
@@ -91,9 +111,6 @@ def compute_workload(conn):
                     COALESCE(SUM(pms_inner.minutes_played), 0)::INT AS minute_sum
                 FROM player_match_stats pms_outer
                 JOIN matches m_outer ON m_outer.match_id = pms_outer.match_id
-                -- Inner self-join: only rows strictly before this match date
-                -- and within the 30-day window.  Use INNER JOIN + WHERE so
-                -- the date predicate filters rows, not just join attachment.
                 LEFT JOIN (
                     player_match_stats pms_inner
                     JOIN matches m_inner ON m_inner.match_id = pms_inner.match_id
@@ -103,7 +120,7 @@ def compute_workload(conn):
                   AND m_inner.match_date    < m_outer.match_date
                 GROUP BY pms_outer.stat_id
             ) sub
-            WHERE pms.stat_id = sub.stat_id
+            WHERE pmf.stat_id = sub.stat_id
         """)
         updated = cur.rowcount
     conn.commit()
@@ -114,6 +131,7 @@ def run(conn=None):
     if conn is None:
         conn = connect(DB_DSN)
 
+    _ensure_feature_rows(conn)
     compute_workload(conn)
     compute_days_since_last_injury(conn)
     compute_injury_label(conn)

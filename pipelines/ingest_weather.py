@@ -2,18 +2,16 @@
 pipelines/ingest_weather.py
 
 Fetch historical weather from Open-Meteo and backfill weather_id into
-player_match_stats.  Also backfills resolved stadium coordinates back into
-the matches table (stadium_lat / stadium_lng).
+player_match_stats.  Coordinates are now stored in the stadiums table
+(not on matches directly), so this module reads from and writes to stadiums.
 
-Changes
--------
-- Retry + exponential backoff on rate-limit (HTTP 429) and transient errors
-- weather_condition derived from numeric fields (was always NULL)
-- weather_id backfill: after inserting weather rows, UPDATE player_match_stats
-  so rows written by ingest_statsbomb (which runs first) get their weather_id set
-- stadium_lat / stadium_lng backfill: resolved coordinates are written back to
-  matches so the column is no longer entirely NULL
-- Logging reduced to essential progress lines
+Changes vs original
+-------------------
+- Stadium coordinates read from stadiums JOIN matches (not matches.stadium_lat/lng).
+- _backfill_stadium_coords() writes to stadiums.stadium_lat / stadium_lng.
+- weather_id backfill path unchanged (player_match_stats.weather_id).
+- Retry + exponential backoff on HTTP 429 and transient errors.
+- weather_condition derived from numeric fields (CHECK constraint enforced).
 """
 
 import logging
@@ -157,7 +155,11 @@ def _resolve_coords(
 
 
 def _derive_condition(temp_c, precip_mm, wind_kmh) -> str:
-    """Map numeric weather values to a condition label."""
+    """
+    Map numeric weather values to a condition label.
+    Values must match the CHECK constraint on weather.weather_condition:
+      'clear' | 'rain' | 'heavy_rain' | 'windy' | 'cold' | 'hot'
+    """
     p = precip_mm or 0.0
     w = wind_kmh  or 0.0
     t = temp_c    if temp_c is not None else 15.0
@@ -223,7 +225,7 @@ def _fetch_one(match_id, lat, lng, date_str, sem):
 
 
 def _backfill_weather_ids(conn):
-    """Set weather_id on player_match_stats rows that were written before weather existed."""
+    """Set weather_id on player_match_stats rows written before weather existed."""
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE player_match_stats pms
@@ -240,34 +242,56 @@ def _backfill_weather_ids(conn):
 
 def _backfill_stadium_coords(conn, coord_map: dict[int, tuple[float, float]]):
     """
-    Write resolved (lat, lng) pairs back to matches.stadium_lat / stadium_lng.
+    Write resolved (lat, lng) pairs back to the stadiums table.
 
-    coord_map: {match_id -> (lat, lng)}  — only entries where both are non-None.
+    coord_map: {match_id -> (lat, lng)}
+    We join matches -> stadiums to find the stadium_id, then update
+    stadiums.stadium_lat / stadium_lng where currently NULL.
     """
     if not coord_map:
         return
 
-    rows = [(lat, lng, mid) for mid, (lat, lng) in coord_map.items()]
+    # Build {stadium_id -> (lat, lng)} by looking up via match_id
     with conn.cursor() as cur:
-        # Only update rows that are currently NULL to avoid overwriting manual data
+        match_ids = list(coord_map.keys())
+        cur.execute("""
+            SELECT match_id, stadium_id
+            FROM   matches
+            WHERE  match_id = ANY(%s)
+              AND  stadium_id IS NOT NULL
+        """, (match_ids,))
+        mid_to_sid = {mid: sid for mid, sid in cur.fetchall()}
+
+    sid_coords: dict[int, tuple] = {}
+    for mid, coords in coord_map.items():
+        sid = mid_to_sid.get(mid)
+        if sid is not None:
+            sid_coords[sid] = coords
+
+    if not sid_coords:
+        return
+
+    rows = [(lat, lng, sid) for sid, (lat, lng) in sid_coords.items()]
+    with conn.cursor() as cur:
         from psycopg2.extras import execute_batch
         execute_batch(cur, """
-            UPDATE matches
+            UPDATE stadiums
             SET    stadium_lat = %s,
                    stadium_lng = %s
-            WHERE  match_id    = %s
+            WHERE  stadium_id  = %s
               AND  stadium_lat IS NULL
         """, rows)
         updated = cur.rowcount
     conn.commit()
     if updated:
-        logger.info("Backfilled stadium_lat/lng on %d match rows", updated)
+        logger.info("Backfilled stadium_lat/lng on %d stadium rows", updated)
 
 
 def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
     """
     Fetch and store weather for all matches without a weather row.
-    Backfills weather_id into player_match_stats and lat/lng into matches afterwards.
+    Reads stadium coordinates from the stadiums table (via JOIN on matches).
+    Backfills weather_id into player_match_stats and coordinates into stadiums.
     Returns {match_id -> weather_id}.
     """
     if conn is None:
@@ -275,10 +299,11 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT m.match_id, m.match_date, m.stadium_name,
-                   m.stadium_lat, m.stadium_lng
+            SELECT m.match_id, m.match_date,
+                   s.stadium_name, s.stadium_lat, s.stadium_lng
             FROM   matches m
-            LEFT JOIN weather w ON w.match_id = m.match_id
+            LEFT JOIN stadiums s ON s.stadium_id = m.stadium_id
+            LEFT JOIN weather  w ON w.match_id   = m.match_id
             WHERE  w.weather_id IS NULL
             ORDER BY m.match_date
         """)
@@ -286,9 +311,9 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
 
     logger.info("Weather ingestion: %d matches need data", len(pending_rows))
 
-    work_items  = []           # (match_id, lat, lng, date_str)
-    coord_map   = {}           # match_id -> (lat, lng)  for stadium backfill
-    skipped     = 0
+    work_items:  list  = []
+    coord_map:   dict  = {}   # match_id -> (lat, lng) for stadium backfill
+    skipped      = 0
     unresolved: set[str] = set()
 
     for match_id, match_date, stadium_name, lat, lng in pending_rows:
@@ -311,7 +336,7 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
         len(work_items), skipped,
     )
 
-    # Backfill resolved coords into matches regardless of weather outcome
+    # Backfill resolved coords into stadiums table
     _backfill_stadium_coords(conn, coord_map)
 
     if not work_items:

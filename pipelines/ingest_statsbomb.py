@@ -13,6 +13,8 @@ Fixes in this version
   by ingest_weather.py after it runs (see load/postgres.py update_weather_ids).
 - Schema rename: statsbomb_match_id -> sb_match_id, statsbomb_team_id ->
   sb_team_id, statsbomb_player_id -> sb_player_id throughout.
+- Stadium refactor: matches no longer carries stadium_name/lat/lng directly.
+  A stadiums table is upserted first; upsert_match receives stadium_id.
 """
 
 import logging
@@ -26,7 +28,7 @@ import pandas as pd
 
 from config.settings import COMPETITIONS, DATA_ROOT, DB_DSN
 from extract import statsbomb_local as sb
-from load.postgres import connect, insert_stats, upsert_match, upsert_pass_edges
+from load.postgres import connect, insert_stats, upsert_match, upsert_pass_edges, upsert_stadium
 from transform.features import (
     agg_match_by_player,
     extract_player_id_col,
@@ -36,7 +38,7 @@ from transform.features import (
 
 logger = logging.getLogger(__name__)
 
-_WORKERS     = max(1, (os.cpu_count() or 2) - 1)
+_WORKERS      = max(1, (os.cpu_count() or 2) - 1)
 _COMMIT_EVERY = 50
 
 
@@ -155,7 +157,14 @@ def _extract_pass_edges_sb(events, type_col, player_id_col, team_id_col, sb_matc
 # DB writer (main process)
 # ---------------------------------------------------------------------------
 
-def _write_results(conn, team_cache, player_cache, results, weather_cache):
+def _write_results(conn, team_cache, player_cache, results, weather_cache,
+                   stadium_cache: dict):
+    """
+    Persist a batch of MatchResult objects.
+
+    stadium_cache: mutable dict {stadium_name -> stadium_id} maintained across
+    batches to avoid redundant upsert_stadium calls within the same run.
+    """
     all_stat_rows = []
     all_edge_rows = []
 
@@ -172,11 +181,20 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache):
         # must NOT overwrite a real name already staged for the same sb_tid
         for sb_pid, (p_name, sb_tid) in res.player_team.items():
             player_cache.get_or_create(sb_pid, p_name)
-            # Pass real name if known, empty string otherwise (cache guards blank)
             team_cache.get_or_create(sb_tid, "")
 
         team_cache.flush()
         player_cache.flush()
+
+        # Resolve or create the stadium row
+        stadium_id: Optional[int] = None
+        if res.stadium_name:
+            if res.stadium_name not in stadium_cache:
+                # Coordinates unknown at this stage; ingest_weather fills them.
+                stadium_cache[res.stadium_name] = upsert_stadium(
+                    conn, res.stadium_name
+                )
+            stadium_id = stadium_cache[res.stadium_name]
 
         hs, aw = res.home_score, res.away_score
         if hs > aw:
@@ -195,9 +213,7 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache):
             "away_score":   res.away_score,
             "competition":  res.comp_name,
             "season":       res.season,
-            "stadium_name": res.stadium_name,
-            "stadium_lat":  None,
-            "stadium_lng":  None,
+            "stadium_id":   stadium_id,
         })
 
         # weather_id is NULL at this stage; backfilled by ingest_weather
@@ -256,6 +272,9 @@ def run(conn, team_cache, player_cache, weather_cache=None,
     if weather_cache is None:
         weather_cache = {}
 
+    # Shared stadium name -> stadium_id cache for the duration of this run
+    stadium_cache: dict[str, int] = {}
+
     comps = sb.competitions()
     if COMPETITIONS:
         comps = comps[comps.apply(
@@ -313,7 +332,7 @@ def run(conn, team_cache, player_cache, weather_cache=None,
                     done += 1
                     if len(pending) >= commit_every:
                         s, e = _write_results(conn, team_cache, player_cache,
-                                              pending, weather_cache)
+                                              pending, weather_cache, stadium_cache)
                         total_stats += s
                         total_edges += e
                         logger.info("  %d/%d matches flushed", done, len(matches))
@@ -321,7 +340,7 @@ def run(conn, team_cache, player_cache, weather_cache=None,
 
                 if pending:
                     s, e = _write_results(conn, team_cache, player_cache,
-                                          pending, weather_cache)
+                                          pending, weather_cache, stadium_cache)
                     total_stats += s
                     total_edges += e
 

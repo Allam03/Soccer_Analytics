@@ -13,7 +13,8 @@ Priority 4  Blocking + RapidFuzz (handles transliteration / umlaut variants)
 Schema
 ------
 players.sb_player_id   (was statsbomb_player_id)
-players.tm_player_id   (was transfermarkt_player_id)
+players.tm_player_id   INT  (changed from TEXT — cast on read/write)
+injuries               UNIQUE(player_id, injury_date, injury_type) — ON CONFLICT DO NOTHING
 """
 
 import logging
@@ -42,11 +43,12 @@ FULL_THRESHOLD = 85
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_tm_id(raw) -> str | None:
+def _to_tm_id(raw) -> int | None:
+    """Convert a raw TM player ID value to int (schema stores INT, not TEXT)."""
     if not pd.notna(raw):
         return None
     try:
-        return str(int(float(raw)))
+        return int(float(raw))
     except (ValueError, TypeError):
         return None
 
@@ -85,18 +87,18 @@ def _parse_dates(series: pd.Series) -> pd.Series:
 
 class PlayerIndex:
     def __init__(self, conn):
-        self.tm_id_map: dict[str, int]         = {}
-        self.norm_map:  dict[str, int]         = {}
-        self.token_map: dict[frozenset, int]   = {}
-        self.blocks:    dict[str, list[tuple]] = {}
+        self.tm_id_map: dict[int, int]         = {}   # tm_id (int) -> player_id
+        self.norm_map:  dict[str, int]          = {}
+        self.token_map: dict[frozenset, int]    = {}
+        self.blocks:    dict[str, list[tuple]]  = {}
 
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT player_id, tm_player_id, norm_name FROM players"
             )
             for pid, tmid, nn in cur.fetchall():
-                if tmid:
-                    self.tm_id_map[str(tmid)] = pid
+                if tmid is not None:
+                    self.tm_id_map[int(tmid)] = pid
                 if not nn:
                     continue
                 self.norm_map[nn] = pid
@@ -111,8 +113,8 @@ class PlayerIndex:
         logger.info("Player index: %d TM-linked | %d norm | %d blocks",
                     len(self.tm_id_map), len(self.norm_map), len(self.blocks))
 
-    def register(self, tm_id: str | None, pg_pid: int, nn: str):
-        if tm_id:
+    def register(self, tm_id: int | None, pg_pid: int, nn: str):
+        if tm_id is not None:
             self.tm_id_map[tm_id] = pg_pid
         if nn:
             self.norm_map[nn] = pg_pid
@@ -138,7 +140,7 @@ def _candidate_norms(row: pd.Series) -> list[str]:
 
 def _resolve(row, index, last_threshold, full_threshold):
     tm_id = _to_tm_id(row.get("transfermarkt_player_id"))
-    if tm_id and tm_id in index.tm_id_map:
+    if tm_id is not None and tm_id in index.tm_id_map:
         return index.tm_id_map[tm_id], "tm_id"
 
     candidates = _candidate_norms(row)
@@ -218,7 +220,7 @@ def ingest_players(conn, players_csv, last_threshold=LAST_THRESHOLD,
         by_method[method] = by_method.get(method, 0) + 1
         linked += 1
 
-        tm_id = _to_tm_id(row.get("transfermarkt_player_id"))
+        tm_id = _to_tm_id(row.get("transfermarkt_player_id"))   # int | None
         dob   = row.get("date_of_birth") if pd.notna(row.get("date_of_birth") if "date_of_birth" in row.index else None) else None
         nat   = (str(row.get("country_of_citizenship") or "").strip()
                  or str(row.get("country_of_birth") or "").strip() or None) or None
@@ -254,14 +256,14 @@ def ingest_players(conn, players_csv, last_threshold=LAST_THRESHOLD,
         cur.execute("SELECT COUNT(*) FROM players WHERE tm_player_id IS NOT NULL")
         logger.info("Players with TM id in DB: %d", cur.fetchone()[0])
 
-    return index.tm_id_map
+    return index.tm_id_map  # {tm_id (int) -> player_id}
 
 
 # ---------------------------------------------------------------------------
 # Pass 2: injuries CSV -> injuries table
 # ---------------------------------------------------------------------------
 
-def ingest_injuries(conn, injuries_csv, tm_id_map):
+def ingest_injuries(conn, injuries_csv, tm_id_map: dict[int, int]):
     logger.info("Pass 2: %s", injuries_csv)
     df = pd.read_csv(injuries_csv, low_memory=False)
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
@@ -289,7 +291,7 @@ def ingest_injuries(conn, injuries_csv, tm_id_map):
     unmatched = 0
 
     for _, row in df.iterrows():
-        tm_id = _to_tm_id(row.get("player_id"))
+        tm_id = _to_tm_id(row.get("player_id"))   # int | None
         if tm_id is None or tm_id not in tm_id_map:
             unmatched += 1
             continue
@@ -317,7 +319,7 @@ def ingest_injuries(conn, injuries_csv, tm_id_map):
                     player_id, injury_type, injury_date,
                     return_date, matches_missed, season
                 ) VALUES %s
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (player_id, injury_date, injury_type) DO NOTHING
             """, rows)
         conn.commit()
         logger.info("Inserted %d injury rows", len(rows))

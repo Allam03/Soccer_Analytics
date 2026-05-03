@@ -2,10 +2,21 @@
 utils/validate_schema.py
 
 Validate that the live PostgreSQL schema matches the expected DDL.
+
 Column names follow the renamed convention:
   sb_*_id   StatsBomb source identifiers
-  tm_*_id   Transfermarkt source identifiers
+  tm_*_id   Transfermarkt source identifiers (INT, not TEXT)
   *_id      Internal surrogate PKs
+
+Schema changes reflected:
+  - stadiums table added; matches references stadium_id (no stadium_name/lat/lng)
+  - player_match_features table added (computed ML columns separated from stats)
+  - player_match_stats loses days_since_last_injury, matches/minutes_last_30_days,
+    is_injured_next_30d
+  - players.tm_player_id is now INT (integer) not TEXT
+  - injuries has UNIQUE(player_id, injury_date, injury_type)
+  - pass_network_edges has UNIQUE(match_id, team_id, passer_id, receiver_id)
+  - weather.weather_condition has a CHECK constraint (validated separately)
 """
 
 import logging
@@ -44,8 +55,14 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "player_name":  "text",
             "norm_name":    "text",
             "sb_player_id": "integer",
-            "tm_player_id": "text",
+            "tm_player_id": "integer",    # changed from text -> int
             "date_of_birth":"date",
+        },
+        "stadiums": {
+            "stadium_id":   "integer",
+            "stadium_name": "text",
+            "stadium_lat":  "double precision",
+            "stadium_lng":  "double precision",
         },
         "matches": {
             "match_id":    "integer",
@@ -57,9 +74,7 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "away_score":  "integer",
             "competition": "text",
             "season":      "text",
-            "stadium_name":"text",
-            "stadium_lat": "double precision",
-            "stadium_lng": "double precision",
+            "stadium_id":  "integer",     # replaces stadium_name/lat/lng
         },
         "weather": {
             "weather_id":       "integer",
@@ -82,6 +97,7 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "match_id":              "integer",
             "team_id":               "integer",
             "weather_id":            "integer",
+            "result":                "text",
             "goals":                 "integer",
             "assists":               "integer",
             "shots":                 "integer",
@@ -103,9 +119,17 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "red_cards":             "integer",
             "minutes_played":        "integer",
             "sub_minute":            "integer",
-            "days_since_last_injury":"integer",
+            # NOTE: days_since_last_injury, matches/minutes_last_30_days,
+            # and is_injured_next_30d are now in player_match_features.
+        },
+        "player_match_features": {
+            "feature_id":            "integer",
+            "stat_id":               "integer",
+            "player_id":             "integer",
+            "match_id":              "integer",
             "matches_last_30_days":  "integer",
             "minutes_last_30_days":  "integer",
+            "days_since_last_injury":"integer",
             "is_injured_next_30d":   "boolean",
         },
         "pass_network_edges": {
@@ -120,6 +144,15 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "avg_x_end":  "double precision",
             "avg_y_end":  "double precision",
         },
+    }
+
+    # Columns that were removed from player_match_stats (to catch stale schemas)
+    removed_from_pms = {
+        "days_since_last_injury",
+        "matches_last_30_days",
+        "minutes_last_30_days",
+        "is_injured_next_30d",
+        "stadium_name",   # moved to stadiums / matches.stadium_id
     }
 
     try:
@@ -144,21 +177,69 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                             f"{table}.{col}: expected {exp_type}, got {existing[col]}"
                         )
 
-            # Unique constraint check
+            # Check that old columns are gone from player_match_stats
             cur.execute("""
-                SELECT COUNT(*) FROM information_schema.table_constraints
-                WHERE table_name = 'player_match_stats'
-                  AND constraint_type = 'UNIQUE'
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'player_match_stats'
+            """)
+            pms_cols = {r[0] for r in cur.fetchall()}
+            for stale in removed_from_pms & pms_cols:
+                warnings.append(
+                    f"player_match_stats.{stale} still present — "
+                    f"should have been moved to player_match_features or stadiums"
+                )
+
+            # Check that old columns are gone from matches
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'matches'
+            """)
+            match_cols = {r[0] for r in cur.fetchall()}
+            for stale in {"stadium_name", "stadium_lat", "stadium_lng"} & match_cols:
+                warnings.append(
+                    f"matches.{stale} still present — moved to stadiums table"
+                )
+
+            # Unique constraint checks
+            for tbl, expected_count, label in [
+                ("player_match_stats",    1, "UNIQUE(player_id, match_id)"),
+                ("player_match_features", 1, "UNIQUE(player_id, match_id)"),
+                ("pass_network_edges",    1, "UNIQUE(match_id, team_id, passer_id, receiver_id)"),
+                ("injuries",              1, "UNIQUE(player_id, injury_date, injury_type)"),
+            ]:
+                cur.execute("""
+                    SELECT COUNT(*) FROM information_schema.table_constraints
+                    WHERE table_name = %s AND constraint_type = 'UNIQUE'
+                """, (tbl,))
+                count = cur.fetchone()[0]
+                if count < expected_count:
+                    errors.append(f"{tbl} missing {label}")
+
+            # CHECK constraint on weather.weather_condition
+            cur.execute("""
+                SELECT COUNT(*) FROM information_schema.check_constraints cc
+                JOIN information_schema.constraint_column_usage cu
+                  ON cu.constraint_name = cc.constraint_name
+                WHERE cu.table_name  = 'weather'
+                  AND cu.column_name = 'weather_condition'
             """)
             if cur.fetchone()[0] == 0:
-                errors.append("player_match_stats missing UNIQUE constraint")
+                warnings.append(
+                    "weather.weather_condition has no CHECK constraint"
+                )
 
             # Orphan checks
             for fk_table, fk_col, ref_table, ref_col in [
-                ("player_match_stats", "player_id", "players", "player_id"),
-                ("player_match_stats", "match_id",  "matches", "match_id"),
-                ("player_match_stats", "team_id",   "teams",   "team_id"),
-                ("injuries",           "player_id", "players", "player_id"),
+                ("player_match_stats",    "player_id", "players", "player_id"),
+                ("player_match_stats",    "match_id",  "matches", "match_id"),
+                ("player_match_stats",    "team_id",   "teams",   "team_id"),
+                ("player_match_features", "stat_id",   "player_match_stats", "stat_id"),
+                ("player_match_features", "player_id", "players", "player_id"),
+                ("player_match_features", "match_id",  "matches", "match_id"),
+                ("injuries",              "player_id", "players", "player_id"),
+                ("matches",               "stadium_id","stadiums","stadium_id"),
             ]:
                 cur.execute(f"""
                     SELECT COUNT(*) FROM {fk_table} f

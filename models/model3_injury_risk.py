@@ -10,12 +10,19 @@ Features
 --------
 minutes_played, matches_last_30_days, minutes_last_30_days,
 days_since_last_injury, age_at_match, sub_minute,
-xg, xa, pressures, tackles, carry_distance
+xg, xa, pressures, tackles, carry_distance,
+interceptions, clearances
+
+Schema change
+-------------
+Workload and injury label columns have moved from player_match_stats to
+player_match_features.  The load_features query now JOINs both tables.
 
 Requires
 --------
 - ingest_injuries.py has run (injuries table populated)
-- compute_labels.py has run (is_injured_next_30d set, workload features filled)
+- compute_labels.py has run (player_match_features rows exist with
+  is_injured_next_30d set, workload features filled)
 - players.date_of_birth populated from Transfermarkt
 """
 
@@ -60,9 +67,9 @@ def load_features(conn) -> pd.DataFrame:
             pms.player_id,
             pms.match_id,
             pms.minutes_played,
-            pms.matches_last_30_days,
-            pms.minutes_last_30_days,
-            pms.days_since_last_injury,
+            pmf.matches_last_30_days,
+            pmf.minutes_last_30_days,
+            pmf.days_since_last_injury,
             pms.sub_minute,
             pms.xg,
             pms.xa,
@@ -71,14 +78,15 @@ def load_features(conn) -> pd.DataFrame:
             pms.carry_distance,
             pms.interceptions,
             pms.clearances,
-            pms.is_injured_next_30d        AS label,
+            pmf.is_injured_next_30d        AS label,
             COALESCE(
                 EXTRACT(YEAR FROM AGE(m.match_date, p.date_of_birth))::INT,
                 25                          -- median fallback when DOB unknown
             ) AS age_at_match
         FROM player_match_stats pms
-        JOIN matches m ON m.match_id  = pms.match_id
-        JOIN players p ON p.player_id = pms.player_id
+        JOIN player_match_features pmf ON pmf.stat_id  = pms.stat_id
+        JOIN matches m                 ON m.match_id   = pms.match_id
+        JOIN players p                 ON p.player_id  = pms.player_id
         WHERE pms.minutes_played >= 1
     """
     with conn.cursor() as cur:
