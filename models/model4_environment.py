@@ -53,7 +53,7 @@ def load_features(conn) -> pd.DataFrame:
             w.precipitation_mm,
             w.wind_speed_kmh,
             w.humidity_pct,
-            m.stadium_name,
+            s.stadium_name,
             CASE
                 WHEN pms.team_id = m.home_team_id THEN 'home'
                 ELSE 'away'
@@ -61,6 +61,7 @@ def load_features(conn) -> pd.DataFrame:
         FROM player_match_stats pms
         JOIN matches m  ON m.match_id  = pms.match_id
         JOIN weather w  ON w.match_id  = pms.match_id
+        JOIN stadiums s ON s.stadium_id = m.stadium_id
         WHERE pms.minutes_played >= 45
           AND w.temperature_c IS NOT NULL
     """
