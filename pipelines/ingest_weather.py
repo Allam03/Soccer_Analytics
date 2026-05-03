@@ -2,7 +2,8 @@
 pipelines/ingest_weather.py
 
 Fetch historical weather from Open-Meteo and backfill weather_id into
-player_match_stats.
+player_match_stats.  Also backfills resolved stadium coordinates back into
+the matches table (stadium_lat / stadium_lng).
 
 Changes
 -------
@@ -10,6 +11,8 @@ Changes
 - weather_condition derived from numeric fields (was always NULL)
 - weather_id backfill: after inserting weather rows, UPDATE player_match_stats
   so rows written by ingest_statsbomb (which runs first) get their weather_id set
+- stadium_lat / stadium_lng backfill: resolved coordinates are written back to
+  matches so the column is no longer entirely NULL
 - Logging reduced to essential progress lines
 """
 
@@ -28,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT  = 4
 REQUEST_TIMEOUT = 20
-MAX_RETRIES     = 4          # attempts per request
-RETRY_BASE_SECS = 2.0        # exponential backoff base
+MAX_RETRIES     = 4
+RETRY_BASE_SECS = 2.0
 
 _DAILY_VARS = (
     "temperature_2m_max,temperature_2m_min,"
@@ -135,7 +138,10 @@ STADIUM_COORDS: dict[str, tuple] = {
 }
 
 
-def _resolve_coords(stadium_name, lat, lng):
+def _resolve_coords(
+    stadium_name: str | None, lat: float | None, lng: float | None
+) -> tuple[float, float] | None:
+    """Return (lat, lng) from DB values first, then the lookup table."""
     if lat is not None and lng is not None:
         return lat, lng
     if not stadium_name:
@@ -151,31 +157,16 @@ def _resolve_coords(stadium_name, lat, lng):
 
 
 def _derive_condition(temp_c, precip_mm, wind_kmh) -> str:
-    """
-    Map numeric weather values to a human-readable condition label.
-
-    Rules (order matters — first match wins):
-      heavy_rain  precip >= 5 mm
-      rain        precip >= 1 mm
-      windy       wind  >= 50 km/h
-      cold        temp  <   5 °C
-      hot         temp  >=  30 °C
-      clear       default
-    """
+    """Map numeric weather values to a condition label."""
     p = precip_mm or 0.0
     w = wind_kmh  or 0.0
     t = temp_c    if temp_c is not None else 15.0
 
-    if p >= 5.0:
-        return "heavy_rain"
-    if p >= 1.0:
-        return "rain"
-    if w >= 50.0:
-        return "windy"
-    if t < 5.0:
-        return "cold"
-    if t >= 30.0:
-        return "hot"
+    if p >= 5.0:  return "heavy_rain"
+    if p >= 1.0:  return "rain"
+    if w >= 50.0: return "windy"
+    if t < 5.0:   return "cold"
+    if t >= 30.0: return "hot"
     return "clear"
 
 
@@ -198,33 +189,33 @@ def _fetch_one(match_id, lat, lng, date_str, sem):
                 )
                 if resp.status_code == 429:
                     wait = RETRY_BASE_SECS * (2 ** (attempt - 1))
-                    logger.debug("Rate limited match %d, retry %d in %.0fs",
-                                 match_id, attempt, wait)
                     time.sleep(wait)
                     continue
 
                 resp.raise_for_status()
                 daily = resp.json().get("daily", {})
 
-                t_max = (daily.get("temperature_2m_max") or [None])[0]
-                t_min = (daily.get("temperature_2m_min") or [None])[0]
-                temp  = (t_max + t_min) / 2 if (t_max is not None and t_min is not None) else None
+                t_max  = (daily.get("temperature_2m_max") or [None])[0]
+                t_min  = (daily.get("temperature_2m_min") or [None])[0]
+                temp   = (t_max + t_min) / 2 if (t_max is not None and t_min is not None) else None
                 precip = (daily.get("precipitation_sum")        or [None])[0]
                 wind   = (daily.get("windspeed_10m_max")        or [None])[0]
                 humid  = (daily.get("relative_humidity_2m_max") or [None])[0]
 
                 return match_id, {
-                    "temperature_c":    temp,
-                    "precipitation_mm": precip,
-                    "wind_speed_kmh":   wind,
-                    "humidity_pct":     humid,
+                    "temperature_c":     temp,
+                    "precipitation_mm":  precip,
+                    "wind_speed_kmh":    wind,
+                    "humidity_pct":      humid,
                     "weather_condition": _derive_condition(temp, precip, wind),
                 }
 
             except requests.exceptions.RequestException as exc:
                 if attempt == MAX_RETRIES:
-                    logger.warning("Weather fetch failed match %d after %d attempts: %s",
-                                   match_id, MAX_RETRIES, exc)
+                    logger.warning(
+                        "Weather fetch failed for match %d after %d attempts: %s",
+                        match_id, MAX_RETRIES, exc,
+                    )
                     return match_id, None
                 time.sleep(RETRY_BASE_SECS * (2 ** (attempt - 1)))
 
@@ -232,10 +223,7 @@ def _fetch_one(match_id, lat, lng, date_str, sem):
 
 
 def _backfill_weather_ids(conn):
-    """
-    After inserting weather rows, set weather_id on player_match_stats rows
-    that were written by ingest_statsbomb with weather_id = NULL.
-    """
+    """Set weather_id on player_match_stats rows that were written before weather existed."""
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE player_match_stats pms
@@ -250,10 +238,36 @@ def _backfill_weather_ids(conn):
         logger.info("Backfilled weather_id on %d player_match_stats rows", updated)
 
 
+def _backfill_stadium_coords(conn, coord_map: dict[int, tuple[float, float]]):
+    """
+    Write resolved (lat, lng) pairs back to matches.stadium_lat / stadium_lng.
+
+    coord_map: {match_id -> (lat, lng)}  — only entries where both are non-None.
+    """
+    if not coord_map:
+        return
+
+    rows = [(lat, lng, mid) for mid, (lat, lng) in coord_map.items()]
+    with conn.cursor() as cur:
+        # Only update rows that are currently NULL to avoid overwriting manual data
+        from psycopg2.extras import execute_batch
+        execute_batch(cur, """
+            UPDATE matches
+            SET    stadium_lat = %s,
+                   stadium_lng = %s
+            WHERE  match_id    = %s
+              AND  stadium_lat IS NULL
+        """, rows)
+        updated = cur.rowcount
+    conn.commit()
+    if updated:
+        logger.info("Backfilled stadium_lat/lng on %d match rows", updated)
+
+
 def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
     """
     Fetch and store weather for all matches without a weather row.
-    Backfills weather_id into player_match_stats afterwards.
+    Backfills weather_id into player_match_stats and lat/lng into matches afterwards.
     Returns {match_id -> weather_id}.
     """
     if conn is None:
@@ -270,10 +284,11 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
         """)
         pending_rows = cur.fetchall()
 
-    logger.info("Weather: %d matches need data", len(pending_rows))
+    logger.info("Weather ingestion: %d matches need data", len(pending_rows))
 
-    work_items = []
-    skipped    = 0
+    work_items  = []           # (match_id, lat, lng, date_str)
+    coord_map   = {}           # match_id -> (lat, lng)  for stadium backfill
+    skipped     = 0
     unresolved: set[str] = set()
 
     for match_id, match_date, stadium_name, lat, lng in pending_rows:
@@ -282,13 +297,22 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
             unresolved.add(stadium_name or "<null>")
             skipped += 1
             continue
+        coord_map[match_id] = coords
         work_items.append((match_id, coords[0], coords[1], str(match_date)))
 
     if unresolved:
-        logger.warning("No coordinates for %d stadium(s): %s",
-                       len(unresolved), sorted(unresolved))
+        logger.warning(
+            "No coordinates found for %d stadium(s): %s",
+            len(unresolved), sorted(unresolved),
+        )
 
-    logger.info("  %d fetchable | %d skipped (no coordinates)", len(work_items), skipped)
+    logger.info(
+        "  %d fetchable | %d skipped (no coordinates)",
+        len(work_items), skipped,
+    )
+
+    # Backfill resolved coords into matches regardless of weather outcome
+    _backfill_stadium_coords(conn, coord_map)
 
     if not work_items:
         _backfill_weather_ids(conn)
@@ -315,8 +339,10 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
             if inserted % 100 == 0:
                 logger.info("  Weather progress: %d / %d", inserted, len(work_items))
 
-    logger.info("Weather complete: %d inserted | %d failed | %d skipped",
-                inserted, failed, skipped)
+    logger.info(
+        "Weather complete: %d inserted | %d failed | %d skipped",
+        inserted, failed, skipped,
+    )
 
     _backfill_weather_ids(conn)
 
