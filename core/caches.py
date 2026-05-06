@@ -1,12 +1,4 @@
-"""
-core/caches.py
-
-In-memory caches for teams and players.
-
-Column names follow the schema convention:
-  sb_team_id / sb_player_id   StatsBomb source identifiers
-  team_id / player_id         Internal surrogate PKs
-"""
+"""In-memory caches for teams and players."""
 
 from psycopg2.extras import execute_values
 from core.utils import norm_name
@@ -14,9 +6,9 @@ from core.utils import norm_name
 
 class TeamCache:
     def __init__(self, conn):
-        self.conn     = conn
-        self.cache    = {}                    # sb_team_id -> team_id
-        self._pending: dict[int, str] = {}    # sb_team_id -> name
+        self.conn = conn
+        self.cache: dict[int, int] = {}        # sb_team_id -> team_id
+        self._pending: dict[int, str] = {}     # sb_team_id -> name
         self._load()
 
     def _load(self):
@@ -67,9 +59,9 @@ class TeamCache:
 
 class PlayerCache:
     def __init__(self, conn):
-        self.conn  = conn
-        self.sb    = {}   # sb_player_id -> player_id
-        self.norm  = {}   # norm_name    -> player_id
+        self.conn = conn
+        self.sb: dict[int, int] = {}            # sb_player_id -> player_id
+        self.norm: dict[str, int] = {}          # norm_name    -> player_id
         self._pending: dict[int, tuple[str, str]] = {}
         self._load()
 
@@ -125,7 +117,7 @@ class PlayerCache:
                 RETURNING player_id, sb_player_id, norm_name
             """, rows)
             for pid, sid, nn in cur.fetchall():
-                self.sb[sid]  = pid
+                self.sb[sid] = pid
                 self.norm[nn] = pid
 
         self.conn.commit()

@@ -1,8 +1,5 @@
 """
-init_db.py
-
-One-time database initialisation script.
-Run this BEFORE any pipeline to create all tables, indexes, and views.
+One-time database initialisation. Run before any pipeline.
 
 Usage:
     python init_db.py
@@ -17,20 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 def init_db(conn):
-    """Execute the full DDL from schema.sql."""
-    schema_path = "schema.sql"
-    logger.info("Reading schema from %s ...", schema_path)
-    with open(schema_path) as f:
+    with open("schema.sql") as f:
         sql = f.read()
-
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
-    logger.info("Schema created / verified successfully.")
+    logger.info("Schema created / verified.")
 
 
 def verify(conn):
-    """Quick sanity check -- list all tables in public schema."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT table_name
@@ -39,12 +31,11 @@ def verify(conn):
             ORDER BY table_name
         """)
         tables = [r[0] for r in cur.fetchall()]
-    logger.info("Tables in database: %s", tables)
-    expected = {
+    logger.info("Tables: %s", tables)
+    missing = {
         "injuries", "matches", "pass_network_edges",
         "player_match_stats", "players", "teams", "weather",
-    }
-    missing = expected - set(tables)
+    } - set(tables)
     if missing:
         logger.error("Missing tables: %s", missing)
     else:

@@ -9,18 +9,16 @@ logging.getLogger("metrics").setLevel(logging.INFO)
 
 @dataclass
 class MetricsTracker:
-    """Track pipeline performance metrics."""
-
     metrics: Dict[str, Any] = field(default_factory=lambda: {
-        "matches_processed":     0,
-        "total_events":          0,
-        "failed_events":         0,
-        "total_time":            0,
+        "matches_processed":      0,
+        "total_events":           0,
+        "failed_events":          0,
+        "total_time":             0,
         "matches_by_competition": defaultdict(int),
-        "events_by_match":       defaultdict(int),
-        "failed_by_match":       defaultdict(int),
-        "completions":           0,
-        "failures":              0,
+        "events_by_match":        defaultdict(int),
+        "failed_by_match":        defaultdict(int),
+        "completions":            0,
+        "failures":               0,
     })
 
     match_start_times: Dict[str, float] = field(default_factory=dict)
@@ -56,10 +54,7 @@ class MetricsTracker:
         self.metrics["failures_reason"] = f"{comp_name}: {error}"
 
     def get_metrics(self) -> Dict[str, Any]:
-        """Return a plain dict of all metrics (safe for .items() iteration)."""
         m = dict(self.metrics)
-
-        # Convert defaultdicts to regular dicts for clean serialisation
         for key in ("matches_by_competition", "events_by_match", "failed_by_match"):
             if key in m:
                 m[key] = dict(m[key])
