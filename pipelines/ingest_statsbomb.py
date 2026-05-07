@@ -58,6 +58,10 @@ class MatchResult:
     player_team:  dict = field(default_factory=dict)   # sb_pid -> (name, sb_tid)
     player_stats: dict = field(default_factory=dict)   # sb_pid -> stats_dict
     pass_edges_sb: list = field(default_factory=list)
+    # After pass_edges_sb field:
+    starting_positions: dict = field(default_factory=dict)  # sb_pid -> position_name
+    minute_snapshots: dict   = field(default_factory=dict)  # (sb_tid, minute) -> stats
+
     error: Optional[str] = None
 
 
@@ -105,6 +109,20 @@ def _process_match(
         result.player_stats = agg_match_by_player(events, type_col, player_id_col)
         result.pass_edges_sb = _extract_pass_edges_sb(
             events, type_col, player_id_col, team_id_col, sb_match_id
+        )
+        # Extract starting positions from lineups
+        from transform.features import extract_starting_positions, build_minute_snapshots
+        try:
+            lineups_df = sb.lineups(sb_match_id)
+            result.starting_positions = extract_starting_positions(lineups_df)
+        except Exception as exc:
+            logger.debug("Lineup load failed for match %d: %s", sb_match_id, exc)
+
+        # Build minute snapshots for Model 5 in-game sub-model
+        result.minute_snapshots = build_minute_snapshots(
+            events,
+            home_team["home_team_id"],
+            away_team["away_team_id"],
         )
     except Exception as exc:
         result.error = str(exc)
@@ -156,7 +174,19 @@ def _extract_pass_edges_sb(events, type_col, player_id_col, team_id_col, sb_matc
 # ---------------------------------------------------------------------------
 # DB writer (main process)
 # ---------------------------------------------------------------------------
-
+def _upsert_snapshots(conn, rows: list, page_size: int = 1000):
+    from psycopg2.extras import execute_values
+    with conn.cursor() as cur:
+        execute_values(cur, """
+            INSERT INTO match_minute_snapshots (
+                match_id, team_id, minute,
+                goals_so_far, xg_so_far, shots_so_far,
+                passes_so_far, pass_acc_so_far,
+                pressures_so_far, red_cards_so_far
+            ) VALUES %s
+            ON CONFLICT (match_id, team_id, minute) DO NOTHING
+        """, rows, page_size=page_size)
+        
 def _write_results(conn, team_cache, player_cache, results, weather_cache,
                    stadium_cache: dict):
     """
@@ -243,6 +273,7 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
                 stats["clearances"], stats["pressures"],
                 stats["yellow_cards"], stats["red_cards"],
                 stats["minutes_played"], stats["sub_minute"],
+                res.starting_positions.get(sb_pid),   # starting_position
             ))
 
         for (_, sb_tid, sb_pid, sb_rid, n, axs, ays, axe, aye) in res.pass_edges_sb:
@@ -258,6 +289,38 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
             ))
 
     insert_stats(conn, all_stat_rows)
+    # Write minute snapshots
+    all_snapshot_rows = []
+    for res in results:
+        if res.error:
+            continue
+        if not res.minute_snapshots:
+            continue
+        # We need to resolve pg_match_id and pg_team_id for this result.
+        # Re-resolve: match was already upserted above so we look it up.
+        with conn.cursor() as cur_inner:
+            cur_inner.execute(
+                "SELECT match_id FROM matches WHERE sb_match_id = %s",
+                (res.sb_match_id,)
+            )
+            row = cur_inner.fetchone()
+        if not row:
+            continue
+        pg_mid = row[0]
+        for (sb_tid, minute), snap in res.minute_snapshots.items():
+            try:
+                pg_tid = team_cache.resolve(sb_tid)
+            except KeyError:
+                continue
+            all_snapshot_rows.append((
+                pg_mid, pg_tid, minute,
+                snap["goals_so_far"], snap["xg_so_far"],
+                snap["shots_so_far"], snap["passes_so_far"],
+                snap["pass_acc_so_far"], snap["pressures_so_far"],
+                snap["red_cards_so_far"],
+            ))
+    if all_snapshot_rows:
+        _upsert_snapshots(conn, all_snapshot_rows)
     upsert_pass_edges(conn, all_edge_rows)
     conn.commit()
     return len(all_stat_rows), len(all_edge_rows)

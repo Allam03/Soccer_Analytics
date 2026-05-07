@@ -1,6 +1,6 @@
-DB_DSN = "postgresql://postgres:123456@localhost:5432/soccer_db"
+DB_DSN = "postgresql://postgres:111222@localhost:5432/soccer_db"
 
-DATA_ROOT = r"E:\College\Final Project\open-data-master\data"
+DATA_ROOT = r"C:\Users\PC\open-data-master\data"
 
 # (competition_id, season_id) pairs that are in scope.
 # La Liga: competition_id=11, seasons 2015/16-2020/21
@@ -24,8 +24,8 @@ OPEN_METEO_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Path to the Transfermarkt injuries CSV
 # Download from: https://www.kaggle.com/datasets/irrazional/transfermarkt-injuries
-TRANSFERMARKT_CSV = r"E:\College\Final Project\transfermarkt_injuries.csv"
+TRANSFERMARKT_CSV = r"C:\Users\PC\transfermarkt.csv"
 
 # Path to the Transfermarkt players CSV
 # Download from: https://www.kaggle.com/datasets/davidcariboo/player-scores?select=players.csv
-TRANSFERMARKT_PLAYERS_CSV = r"E:\College\Final Project\transfermarkt_players.csv"
+TRANSFERMARKT_PLAYERS_CSV = r"C:\Users\PC\players.csv"

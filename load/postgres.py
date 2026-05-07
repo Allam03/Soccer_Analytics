@@ -96,7 +96,7 @@ def insert_stats(conn, rows: list, page_size: int = 500):
         passes_attempted, passes_completed, pass_accuracy, progressive_passes,
         carry_distance, progressive_carries, dribbles_completed,
         tackles, interceptions, clearances, pressures,
-        yellow_cards, red_cards, minutes_played, sub_minute
+        yellow_cards, red_cards, minutes_played, sub_minute, starting_position
     """
     if not rows:
         return
@@ -111,7 +111,8 @@ def insert_stats(conn, rows: list, page_size: int = 500):
                 dribbles_completed,
                 tackles, interceptions, clearances, pressures,
                 yellow_cards, red_cards,
-                minutes_played, sub_minute
+                minutes_played, sub_minute, starting_position
+                
             ) VALUES %s
             ON CONFLICT (player_id, match_id) DO UPDATE SET
                 goals               = EXCLUDED.goals,
@@ -135,6 +136,7 @@ def insert_stats(conn, rows: list, page_size: int = 500):
                 red_cards           = EXCLUDED.red_cards,
                 minutes_played      = EXCLUDED.minutes_played,
                 sub_minute          = EXCLUDED.sub_minute,
+                starting_position   = EXCLUDED.starting_position,
                 weather_id          = EXCLUDED.weather_id,
                 result              = EXCLUDED.result
         """, rows, page_size=page_size)

@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
 
     minutes_played          INT     DEFAULT 0,
     sub_minute              INT,
+    starting_position       TEXT,
 
     UNIQUE (player_id, match_id)
 );
@@ -202,6 +203,32 @@ CREATE TABLE IF NOT EXISTS pass_network_edges (
     avg_y_end       FLOAT,
     UNIQUE (match_id, team_id, passer_id, receiver_id)
 );
+
+-- -----------------------------------------------------------------------------
+-- MATCH MINUTE SNAPSHOTS  (cumulative in-game stats per team, per minute)
+-- Used by Model 5 in-game sub-model
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS match_minute_snapshots (
+    snapshot_id         SERIAL  PRIMARY KEY,
+    match_id            INT     NOT NULL REFERENCES matches (match_id) ON DELETE CASCADE,
+    team_id             INT     NOT NULL REFERENCES teams   (team_id),
+    minute              INT     NOT NULL,
+
+    -- Cumulative totals up to and including this minute
+    goals_so_far        INT     DEFAULT 0,
+    xg_so_far           FLOAT   DEFAULT 0,
+    shots_so_far        INT     DEFAULT 0,
+    passes_so_far       INT     DEFAULT 0,
+    pass_acc_so_far     FLOAT   DEFAULT 0,   -- rolling accuracy up to this minute
+    pressures_so_far    INT     DEFAULT 0,
+    red_cards_so_far    INT     DEFAULT 0,
+
+    UNIQUE (match_id, team_id, minute)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mms_match       ON match_minute_snapshots (match_id);
+CREATE INDEX IF NOT EXISTS idx_mms_match_team  ON match_minute_snapshots (match_id, team_id);
+CREATE INDEX IF NOT EXISTS idx_mms_minute      ON match_minute_snapshots (minute);
 
 CREATE INDEX IF NOT EXISTS idx_pne_match ON pass_network_edges (match_id);
 CREATE INDEX IF NOT EXISTS idx_pne_team  ON pass_network_edges (match_id, team_id);

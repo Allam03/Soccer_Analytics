@@ -109,6 +109,7 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "yellow_cards":      "integer",
             "red_cards":         "integer",
             "minutes_played":    "integer",
+            "starting_position":  "text",
             "sub_minute":        "integer",
         },
         "player_match_features": {
@@ -120,6 +121,19 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "minutes_last_30_days":  "integer",
             "days_since_last_injury":"integer",
             "is_injured_next_30d":   "boolean",
+        },
+        "match_minute_snapshots": {
+            "snapshot_id":       "integer",
+            "match_id":          "integer",
+            "team_id":           "integer",
+            "minute":            "integer",
+            "goals_so_far":      "integer",
+            "xg_so_far":         "double precision",
+            "shots_so_far":      "integer",
+            "passes_so_far":     "integer",
+            "pass_acc_so_far":   "double precision",
+            "pressures_so_far":  "integer",
+            "red_cards_so_far":  "integer",
         },
         "pass_network_edges": {
             "edge_id":     "integer",
@@ -153,6 +167,7 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
         "player_match_features": 2,   # (stat_id) + (player_id, match_id)
         "injuries":              1,   # (player_id, injury_date, injury_type)
         "pass_network_edges":    1,   # (match_id, team_id, passer_id, receiver_id)
+        "match_minute_snapshots": 1,
     }
 
     try:

@@ -310,3 +310,197 @@ def _resolve_name(val) -> str:
     if isinstance(val, dict):
         return val.get("name", "")
     return val or ""
+def extract_starting_positions(lineups_df: pd.DataFrame) -> dict[int, str]:
+    """
+    Parse a StatsBomb lineups DataFrame and return
+    {sb_player_id -> dominant_position_name}.
+
+    The real lineup schema is:
+        lineup: list of player dicts, each with:
+            player_id: int
+            positions: list of position-interval dicts:
+                {
+                  "position_id": int,
+                  "position": str,          <-- the name we want
+                  "from": "MM:SS",
+                  "to": "MM:SS" | null,
+                  "from_period": int,
+                  "to_period": int | null,
+                  "start_reason": str,      <-- "Starting XI" | "Tactical Shift" | ...
+                  "end_reason": str | null
+                }
+
+    Dominant position = the position interval with start_reason "Starting XI".
+    If a player has multiple intervals (e.g. tactical shift after kick-off),
+    we still take the Starting XI one because that reflects their pre-match role.
+    If no "Starting XI" interval exists (substitute), we take the first interval.
+    """
+    pos_map: dict[int, str] = {}
+
+    for _, team_row in lineups_df.iterrows():
+        players = team_row.get("lineup") or []
+        if not isinstance(players, list):
+            continue
+
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+
+            pid = player.get("player_id")
+            if not isinstance(pid, int):
+                continue
+
+            positions = player.get("positions")
+            if not isinstance(positions, list) or len(positions) == 0:
+                continue
+
+            # Priority 1: interval where start_reason == "Starting XI"
+            starting = [
+                p for p in positions
+                if isinstance(p, dict)
+                and p.get("start_reason") == "Starting XI"
+            ]
+
+            if starting:
+                # If somehow multiple (rare), take the one from period 1
+                starting.sort(key=lambda p: p.get("from_period") or 99)
+                chosen = starting[0]
+            else:
+                # Substitute — take their first recorded position interval
+                valid = [p for p in positions if isinstance(p, dict)]
+                if not valid:
+                    continue
+                chosen = valid[0]
+
+            pos_name = chosen.get("position") or ""
+            if pos_name:
+                pos_map[int(pid)] = pos_name
+
+    return pos_map
+
+
+def build_minute_snapshots(
+    events: pd.DataFrame,
+    home_sb_team_id: int,
+    away_sb_team_id: int,
+) -> dict[tuple[int, int], dict]:
+    """
+    Build cumulative per-team per-minute stats from a match events DataFrame.
+
+    Returns {(sb_team_id, minute) -> cumulative_stats_dict}.
+    We compute a row for every minute in which at least one event occurred,
+    carrying forward totals from the previous minute.
+    """
+    type_col   = events["type"].map(
+        lambda t: t.get("name") if isinstance(t, dict) else (t or "")
+    )
+    team_id_col = events["team"].map(
+        lambda t: t.get("id") if isinstance(t, dict) else None
+    )
+
+    # Per-event contributions
+    records = []
+    for idx, row in events.iterrows():
+        t_name = type_col.at[idx]
+        sb_tid = team_id_col.at[idx]
+        if sb_tid is None or sb_tid not in (home_sb_team_id, away_sb_team_id):
+            continue
+        minute = int(row.get("minute") or 0)
+
+        is_goal     = 0
+        xg_contrib  = 0.0
+        is_shot     = 0
+        is_pass     = 0
+        pass_ok     = 0
+        is_pressure = 0
+        is_red      = 0
+
+        if t_name == "Shot":
+            shot = row.get("shot") or {}
+            xg_contrib = float(shot.get("statsbomb_xg") or 0.0)
+            is_shot = 1
+            outcome = shot.get("outcome")
+            if isinstance(outcome, dict):
+                outcome = outcome.get("name", "")
+            if outcome == "Goal":
+                is_goal = 1
+
+        elif t_name == "Pass":
+            is_pass = 1
+            pass_data = row.get("pass") or {}
+            if pass_data.get("outcome") is None:
+                pass_ok = 1
+
+        elif t_name == "Pressure":
+            is_pressure = 1
+
+        elif t_name == "Bad Behaviour":
+            bb = row.get("bad_behaviour") or {}
+            card = bb.get("card")
+            if isinstance(card, dict):
+                card = card.get("name", "")
+            if card == "Red Card":
+                is_red = 1
+
+        records.append({
+            "sb_team_id": sb_tid,
+            "minute":     minute,
+            "goal":       is_goal,
+            "xg":         xg_contrib,
+            "shot":       is_shot,
+            "pass":       is_pass,
+            "pass_ok":    pass_ok,
+            "pressure":   is_pressure,
+            "red":        is_red,
+        })
+
+    if not records:
+        return {}
+
+    df = pd.DataFrame(records)
+
+    result = {}
+    for sb_tid in (home_sb_team_id, away_sb_team_id):
+        team_df = df[df["sb_team_id"] == sb_tid]
+        if team_df.empty:
+            continue
+
+        # Aggregate by minute
+        by_min = team_df.groupby("minute").agg(
+            goals=("goal", "sum"),
+            xg=("xg", "sum"),
+            shots=("shot", "sum"),
+            passes=("pass", "sum"),
+            passes_ok=("pass_ok", "sum"),
+            pressures=("pressure", "sum"),
+            reds=("red", "sum"),
+        ).sort_index()
+
+        # Build cumulative running totals across all minutes
+        cum_goals = cum_xg = cum_shots = cum_passes = cum_passes_ok = 0
+        cum_pressures = cum_reds = 0
+
+        all_minutes = sorted(by_min.index.tolist())
+        for m in all_minutes:
+            row_m = by_min.loc[m]
+            cum_goals      += int(row_m["goals"])
+            cum_xg         += float(row_m["xg"])
+            cum_shots      += int(row_m["shots"])
+            cum_passes     += int(row_m["passes"])
+            cum_passes_ok  += int(row_m["passes_ok"])
+            cum_pressures  += int(row_m["pressures"])
+            cum_reds       += int(row_m["reds"])
+
+            pass_acc = (cum_passes_ok / cum_passes * 100) if cum_passes > 0 else 0.0
+
+            result[(sb_tid, m)] = {
+                "goals_so_far":     cum_goals,
+                "xg_so_far":        round(cum_xg, 4),
+                "shots_so_far":     cum_shots,
+                "passes_so_far":    cum_passes,
+                "pass_acc_so_far":  round(pass_acc, 2),
+                "pressures_so_far": cum_pressures,
+                "red_cards_so_far": cum_reds,
+            }
+
+    return result
