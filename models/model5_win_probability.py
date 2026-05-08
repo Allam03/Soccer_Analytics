@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 RESULT_MAP = {"win": 2, "draw": 1, "loss": 0}
 
-FEATURES = [
+FEATURES_PRE_MATCH = [
     "avg_xg_last5",
     "avg_shots_last5",
     "avg_passes_last5",
@@ -57,6 +57,24 @@ FEATURES = [
     "subs_made",
     "is_home",
 ]
+
+FEATURES_IN_GAME = [
+    "minute",
+    "goals_so_far",
+    "xg_so_far",
+    "shots_so_far",
+    "pass_acc_so_far",
+    "pressures_so_far",
+    "red_cards_so_far",
+    "goal_diff_so_far",   # derived: goals_so_far - opponent_goals_so_far
+    "xg_diff_so_far",     # derived
+    "is_home",
+    "avg_xg_last5",       # pre-match context carried into in-game features
+    "avg_pass_acc_last5",
+]
+
+# Keep old name as alias for the pre-match sub-model
+FEATURES = FEATURES_PRE_MATCH
 
 
 def load_features(conn) -> pd.DataFrame:
@@ -122,6 +140,89 @@ def load_features(conn) -> pd.DataFrame:
 
     return df
 
+def load_in_game_features(conn) -> pd.DataFrame:
+    """
+    Build in-game training rows from match_minute_snapshots.
+
+    Each row = one team, one minute, with result label (win/draw/loss at FT).
+    Only includes minutes where snapshots exist (i.e. events occurred).
+    """
+    query = """
+        SELECT
+            mms.match_id,
+            mms.team_id,
+            mms.minute,
+            mms.goals_so_far,
+            mms.xg_so_far,
+            mms.shots_so_far,
+            mms.passes_so_far,
+            mms.pass_acc_so_far,
+            mms.pressures_so_far,
+            mms.red_cards_so_far,
+            -- opponent goals at same minute (latest snapshot <= this minute)
+            COALESCE((
+                SELECT opp.goals_so_far
+                FROM   match_minute_snapshots opp
+                WHERE  opp.match_id  = mms.match_id
+                  AND  opp.team_id  != mms.team_id
+                  AND  opp.minute   <= mms.minute
+                ORDER  BY opp.minute DESC
+                LIMIT  1
+            ), 0) AS opp_goals_so_far,
+            COALESCE((
+                SELECT opp.xg_so_far
+                FROM   match_minute_snapshots opp
+                WHERE  opp.match_id  = mms.match_id
+                  AND  opp.team_id  != mms.team_id
+                  AND  opp.minute   <= mms.minute
+                ORDER  BY opp.minute DESC
+                LIMIT  1
+            ), 0.0) AS opp_xg_so_far,
+            -- full-time result for this team (from player_match_stats)
+            (SELECT DISTINCT pms.result
+             FROM   player_match_stats pms
+             WHERE  pms.match_id = mms.match_id
+               AND  pms.team_id  = mms.team_id
+             LIMIT  1) AS result,
+            -- is_home flag
+            CASE WHEN m.home_team_id = mms.team_id THEN 1 ELSE 0 END AS is_home,
+            -- last-5 rolling averages (reuse pre-match query logic via subquery)
+            COALESCE((
+                SELECT AVG(pms2.xg)
+                FROM   player_match_stats pms2
+                JOIN   matches m2 ON m2.match_id = pms2.match_id
+                WHERE  pms2.team_id  = mms.team_id
+                  AND  m2.match_date < m.match_date
+                ORDER  BY m2.match_date DESC
+                LIMIT  5
+            ), 0) AS avg_xg_last5,
+            COALESCE((
+                SELECT AVG(pms2.pass_accuracy)
+                FROM   player_match_stats pms2
+                JOIN   matches m2 ON m2.match_id = pms2.match_id
+                WHERE  pms2.team_id  = mms.team_id
+                  AND  m2.match_date < m.match_date
+                ORDER  BY m2.match_date DESC
+                LIMIT  5
+            ), 0) AS avg_pass_acc_last5
+        FROM match_minute_snapshots mms
+        JOIN matches m ON m.match_id = mms.match_id
+        -- Sample every 5 minutes to keep training set manageable
+        WHERE mms.minute % 5 = 0
+          AND mms.minute > 0
+        ORDER BY mms.match_id, mms.team_id, mms.minute
+    """
+    with conn.cursor() as cur:
+        cur.execute(query)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    df = pd.DataFrame(rows, columns=cols)
+    if df.empty:
+        return df
+
+    df["goal_diff_so_far"] = df["goals_so_far"] - df["opp_goals_so_far"]
+    df["xg_diff_so_far"]   = df["xg_so_far"]   - df["opp_xg_so_far"]
+    return df
 
 def encode_labels(df: pd.DataFrame) -> np.ndarray:
     return df["result"].map(RESULT_MAP).values
@@ -131,68 +232,70 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
     import os
     os.makedirs(output_dir, exist_ok=True)
 
-    logger.info("Model 5: loading features ...")
-    df = load_features(conn)
+    # ── Sub-model A: pre-match ──────────────────────────────────────────────
+    logger.info("Model 5A: loading pre-match features ...")
+    df_pre = load_features(conn)
 
-    if df.empty:
-        logger.error("Empty feature set -- cannot train Model 5")
-        return {}
+    artifacts = {}
 
-    logger.info("  %d team-match rows", len(df))
-    logger.info("  Class distribution:\n%s", df["result"].value_counts())
+    if not df_pre.empty:
+        logger.info("  %d team-match rows", len(df_pre))
+        X_pre = df_pre[FEATURES_PRE_MATCH].fillna(0).values
+        y_pre = encode_labels(df_pre)
 
-    X = df[FEATURES].fillna(0).values
-    y = encode_labels(df)
+        scaler_pre = StandardScaler()
+        X_sc_pre   = scaler_pre.fit_transform(X_pre)
 
-    scaler = StandardScaler()
-    X_sc   = scaler.fit_transform(X)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        gbc_pre = GradientBoostingClassifier(
+            n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
+        )
+        acc = cross_val_score(gbc_pre, X_sc_pre, y_pre, cv=cv, scoring="accuracy")
+        logger.info("Pre-match GBC accuracy (5-fold): %.3f +/- %.3f", acc.mean(), acc.std())
+        gbc_pre.fit(X_sc_pre, y_pre)
 
-    # Logistic Regression baseline
-    lr = LogisticRegression(
-        class_weight="balanced", max_iter=1000, random_state=42, multi_class="multinomial"
-    )
-    lr_acc = cross_val_score(lr, X_sc, y, cv=cv, scoring="accuracy")
-    logger.info("LR  accuracy (5-fold): %.3f +/- %.3f", lr_acc.mean(), lr_acc.std())
+        joblib.dump(scaler_pre, f"{output_dir}/scaler_pre.pkl")
+        joblib.dump(gbc_pre,    f"{output_dir}/gbc_pre.pkl")
+        df_pre.to_parquet(f"{output_dir}/features_pre.parquet", index=False)
+        artifacts["gbc_pre"] = gbc_pre
+        artifacts["scaler_pre"] = scaler_pre
+    else:
+        logger.error("Empty pre-match feature set")
 
-    # Random Forest
-    rf = RandomForestClassifier(
-        n_estimators=300, max_depth=6, class_weight="balanced",
-        random_state=42, n_jobs=-1
-    )
-    rf_acc = cross_val_score(rf, X_sc, y, cv=cv, scoring="accuracy")
-    logger.info("RF  accuracy (5-fold): %.3f +/- %.3f", rf_acc.mean(), rf_acc.std())
+    # ── Sub-model B: in-game ────────────────────────────────────────────────
+    logger.info("Model 5B: loading in-game features ...")
+    df_ig = load_in_game_features(conn)
 
-    # Gradient Boosting (primary)
-    gbc = GradientBoostingClassifier(
-        n_estimators=300, max_depth=4, learning_rate=0.05,
-        random_state=42
-    )
-    gbc_acc = cross_val_score(gbc, X_sc, y, cv=cv, scoring="accuracy")
-    logger.info("GBC accuracy (5-fold): %.3f +/- %.3f", gbc_acc.mean(), gbc_acc.std())
+    if not df_ig.empty and df_ig["result"].notna().any():
+        logger.info("  %d team-minute rows", len(df_ig))
+        df_ig = df_ig.dropna(subset=["result"])
+        X_ig = df_ig[FEATURES_IN_GAME].fillna(0).values
+        y_ig = encode_labels(df_ig)
 
-    # Fit on full data
-    lr.fit(X_sc, y)
-    rf.fit(X_sc, y)
-    gbc.fit(X_sc, y)
+        scaler_ig = StandardScaler()
+        X_sc_ig   = scaler_ig.fit_transform(X_ig)
 
-    logger.info("\nClassification report (train set -- for diagnostics only):\n%s",
-                classification_report(y, gbc.predict(X_sc),
-                                      target_names=["loss", "draw", "win"]))
+        gbc_ig = GradientBoostingClassifier(
+            n_estimators=300, max_depth=5, learning_rate=0.05, random_state=42
+        )
+        cv_ig = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        acc_ig = cross_val_score(gbc_ig, X_sc_ig, y_ig, cv=cv_ig, scoring="accuracy")
+        logger.info("In-game GBC accuracy (5-fold): %.3f +/- %.3f", acc_ig.mean(), acc_ig.std())
+        gbc_ig.fit(X_sc_ig, y_ig)
 
-    importances = pd.Series(gbc.feature_importances_, index=FEATURES)
-    logger.info("GBC feature importances:\n%s",
-                importances.sort_values(ascending=False))
-
-    joblib.dump(scaler, f"{output_dir}/scaler.pkl")
-    joblib.dump(lr,     f"{output_dir}/lr.pkl")
-    joblib.dump(rf,     f"{output_dir}/rf.pkl")
-    joblib.dump(gbc,    f"{output_dir}/gbc.pkl")
-    df.to_parquet(f"{output_dir}/features.parquet", index=False)
+        joblib.dump(scaler_ig, f"{output_dir}/scaler_ingame.pkl")
+        joblib.dump(gbc_ig,    f"{output_dir}/gbc_ingame.pkl")
+        df_ig.to_parquet(f"{output_dir}/features_ingame.parquet", index=False)
+        artifacts["gbc_ig"] = gbc_ig
+        artifacts["scaler_ig"] = scaler_ig
+    else:
+        logger.warning(
+            "No in-game snapshot data — run ingestion first, then retrain Model 5"
+        )
 
     logger.info("Model 5 artefacts saved to %s", output_dir)
-    return {"lr": lr, "rf": rf, "gbc": gbc, "scaler": scaler}
+    return artifacts
 
 
 if __name__ == "__main__":
