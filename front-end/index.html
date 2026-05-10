@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Soccer Analytics Platform</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- CSS — الترتيب مهم: variables أول، بعدين reset، بعدين layout، بعدين components، بعدين pages -->
+  <link rel="stylesheet" href="/static/css/variables.css" />
+  <link rel="stylesheet" href="/static/css/reset.css" />
+  <link rel="stylesheet" href="/static/css/layout.css" />
+  <link rel="stylesheet" href="/static/css/components.css" />
+  <link rel="stylesheet" href="/static/css/pages.css" />
+
+  <!-- Chart.js من CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ══════════════════════════════════════
+       SIDEBAR — التنقل الجانبي
+  ══════════════════════════════════════ -->
+  <aside class="sidebar">
+
+    <div class="sidebar-logo">
+      <div class="logo-icon">⚽</div>
+      <div>
+        <div class="logo-text">Soccer Analytics</div>
+        <div class="logo-sub">Intelligent Insights</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="nav-item active" data-page="dashboard">
+        <span class="nav-icon">📊</span> Dashboard
+      </div>
+      <div class="nav-item" data-page="player">
+        <span class="nav-icon">👤</span> Player Efficiency
+      </div>
+      <div class="nav-item" data-page="cohesion">
+        <span class="nav-icon">🕸️</span> Team Cohesion
+      </div>
+      <div class="nav-item" data-page="injury">
+        <span class="nav-icon">🏥</span> Injury Risk
+      </div>
+      <div class="nav-item" data-page="env">
+        <span class="nav-icon">🌡️</span> Environment Impact
+      </div>
+      <div class="nav-item" data-page="winprob">
+        <span class="nav-icon">🎯</span> Win Probability
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="data-sources-label">Data Sources</div>
+      <div class="data-source"><div class="ds-dot"></div><span>StatsBomb</span></div>
+      <div class="data-source"><div class="ds-dot"></div><span>Transfermarkt</span></div>
+      <div class="data-source"><div class="ds-dot"></div><span>Weather API</span></div>
+    </div>
+
+  </aside><!-- /sidebar -->
+
+  <!-- ══════════════════════════════════════
+       MAIN WRAPPER — topbar + content
+  ══════════════════════════════════════ -->
+  <div class="main-wrapper">
+
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <span class="page-title" id="pageTitle">Analytics Dashboard</span>
+      </div>
+      <div class="topbar-right">
+        <span class="top-select" id="dataSourceBadge">Data: Loading</span>
+        <select class="top-select">
+          <option>Premier League 2025/26</option>
+          <option>La Liga 2025/26</option>
+          <option>Bundesliga 2025/26</option>
+        </select>
+        <select class="top-select" id="teamSelector">
+          <option>Manchester City</option>
+          <option>Arsenal</option>
+          <option>Liverpool</option>
+          <option>Chelsea</option>
+        </select>
+        <select class="top-select">
+          <option>All Matches</option>
+          <option>Last 5 Matches</option>
+          <option>Last 10 Matches</option>
+        </select>
+        <div class="user-badge">
+          <div class="user-dot"></div>
+          <div>
+            <div class="user-name">Analytics Team</div>
+            <div class="user-role">Administrator</div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /topbar -->
+
+    <!-- CONTENT AREA — كل الصفحات جوه هنا -->
+    <main class="content-area">
+
+      <!-- صفحة 1: Dashboard -->
+      <div class="page active" id="page-dashboard">
+        <!-- المحتوى في pages/dashboard.html — هنا include بالـ JS -->
+        <div id="dashboard-content"></div>
+      </div>
+
+      <!-- صفحة 2: Player Efficiency -->
+      <div class="page" id="page-player">
+        <div id="player-content"></div>
+      </div>
+
+      <!-- صفحة 3: Team Cohesion -->
+      <div class="page" id="page-cohesion">
+        <div id="cohesion-content"></div>
+      </div>
+
+      <!-- صفحة 4: Injury Risk -->
+      <div class="page" id="page-injury">
+        <div id="injury-content"></div>
+      </div>
+
+      <!-- صفحة 5: Environmental -->
+      <div class="page" id="page-env">
+        <div id="env-content"></div>
+      </div>
+
+      <!-- صفحة 6: Win Probability -->
+      <div class="page" id="page-winprob">
+        <div id="winprob-content"></div>
+      </div>
+
+    </main><!-- /content-area -->
+
+  </div><!-- /main-wrapper -->
+</div><!-- /app -->
+
+<!-- Tooltip global -->
+<div class="tooltip" id="tooltip"></div>
+
+<!-- JS — بالترتيب المهم:
+     1. charts.js (يعرّف Charts object)
+     2. passNetwork.js (يعرّف PassNetwork object)
+     3. navigation.js (يعرّف Navigation object)
+     4. main.js (بيستخدم كل الـ objects السابقة)
+-->
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/passNetwork.js"></script>
+<script src="/static/js/navigation.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/main.js"></script>
+
+<!-- Inline loader — بيحمّل HTML الصفحات ويحطها في الـ content divs -->
+<script src="/static/js/pageLoader.js"></script>
+
+</body>
+</html>

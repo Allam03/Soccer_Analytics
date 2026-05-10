@@ -1,0 +1,48 @@
+<!-- pages/winprob.html -->
+
+<!-- البانر الرئيسي للـ % -->
+<div class="prob-banner">
+  <div class="prob-match">Next Match Prediction • Manchester City vs Arsenal • April 20, 2026 • Etihad Stadium</div>
+  <div class="prob-values">
+    <div><div class="prob-pct team1">68%</div><div class="prob-team">Man City Win</div></div>
+    <div><div class="prob-pct draw">22%</div><div class="prob-team">Draw</div></div>
+    <div><div class="prob-pct team2">10%</div><div class="prob-team">Arsenal Win</div></div>
+  </div>
+</div>
+
+<!-- الشارت الديناميكي -->
+<div class="card mb-16">
+  <div class="card-title">Dynamic Win Probability (Simulated Match)</div>
+  <div class="chart-wrap" style="height:220px"><canvas id="winProbChart"></canvas></div>
+</div>
+
+<!-- Key Factors + Historical Accuracy -->
+<div class="two-col">
+  <div class="card">
+    <div class="card-title">Key Input Factors</div>
+    <div class="factors-item"><div class="factor-name">Home Advantage</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:75%"></div></div></div><div class="factor-val">+15%</div></div>
+    <div class="factors-item"><div class="factor-name">Recent Form (5 games)</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:90%"></div></div></div><div class="factor-val">4W-1D</div></div>
+    <div class="factors-item"><div class="factor-name">Head-to-Head Record</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:68%"></div></div></div><div class="factor-val">3W-1D-1L</div></div>
+    <div class="factors-item"><div class="factor-name">Squad Availability</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:95%"></div></div></div><div class="factor-val">95%</div></div>
+    <div class="factors-item"><div class="factor-name">Expected Goals (xG)</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:62%"></div></div></div><div class="factor-val">2.1 vs 1.3</div></div>
+    <div class="factors-item"><div class="factor-name">Weather Conditions</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:80%"></div></div></div><div class="factor-val">Favorable</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Historical Accuracy</div>
+    <div class="inline-stat">
+      <div class="inline-stat-label">Overall Accuracy</div>
+      <div class="inline-stat-val text-accent">73.4%</div>
+    </div>
+    <div class="progress-bar mb-16"><div class="progress-fill green" style="width:73.4%"></div></div>
+    <div class="accuracy-nums">
+      <div class="acc-num"><div class="acc-val pos">156</div><div class="acc-label">Correct Predictions<br>out of 212 matches</div></div>
+      <div class="acc-num"><div class="acc-val neg">56</div><div class="acc-label">Incorrect<br>Upsets &amp; surprises</div></div>
+    </div>
+    <div class="divider"></div>
+    <div class="card-title">Confidence Calibration</div>
+    <p class="text-muted fs-12" style="line-height:1.6">
+      When model predicts 70% win probability, actual win rate is 68.2% — well calibrated.
+    </p>
+  </div>
+</div>

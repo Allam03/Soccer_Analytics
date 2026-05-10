@@ -1,0 +1,30 @@
+<!-- pages/cohesion.html -->
+<div class="kpi-grid">
+  <div class="kpi-card"><div class="kpi-label">Cohesion Index</div><div class="kpi-value text-accent">0.82</div><div class="kpi-sub up">Excellent</div></div>
+  <div class="kpi-card"><div class="kpi-label">Network Density</div><div class="kpi-value text-cyan">0.76</div><div class="kpi-sub up">High connectivity</div></div>
+  <div class="kpi-card"><div class="kpi-label">Average Degree</div><div class="kpi-value">8.4</div><div class="kpi-sub">Pass connections</div></div>
+  <div class="kpi-card"><div class="kpi-label">Clustering Coeff.</div><div class="kpi-value text-amber">0.68</div><div class="kpi-sub up">Strong subgroups</div></div>
+</div>
+
+<div class="card mb-16">
+  <div class="card-title">Pass Network Visualization</div>
+  <div class="pass-network-container">
+    <svg id="passNetworkSvg"></svg>
+  </div>
+  <p class="text-muted fs-11 mt-8">Node size represents passing volume. Line thickness represents connection strength.</p>
+</div>
+
+<div class="two-col">
+  <div class="card">
+    <div class="card-title">Central Players (High Betweenness)</div>
+    <div class="player-list-item"><div><div class="player-list-name">Rodri</div><div class="player-list-role">Defensive Midfielder</div></div><div class="player-centrality">0.89 <span class="text-muted fs-11">Centrality</span></div></div>
+    <div class="player-list-item"><div><div class="player-list-name">De Bruyne</div><div class="player-list-role">Attacking Midfielder</div></div><div class="player-centrality">0.85 <span class="text-muted fs-11">Centrality</span></div></div>
+    <div class="player-list-item"><div><div class="player-list-name">Stones</div><div class="player-list-role">Center Back</div></div><div class="player-centrality">0.72 <span class="text-muted fs-11">Centrality</span></div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Most Connected Players</div>
+    <div class="player-list-item"><div><div class="player-list-name">De Bruyne</div><div class="player-list-role">847 passes</div></div><div class="player-centrality">9.2 <span class="text-muted fs-11">Avg Conn.</span></div></div>
+    <div class="player-list-item"><div><div class="player-list-name">Bernardo Silva</div><div class="player-list-role">792 passes</div></div><div class="player-centrality">8.8 <span class="text-muted fs-11">Avg Conn.</span></div></div>
+    <div class="player-list-item"><div><div class="player-list-name">Grealish</div><div class="player-list-role">731 passes</div></div><div class="player-centrality">8.4 <span class="text-muted fs-11">Avg Conn.</span></div></div>
+  </div>
+</div>

@@ -1,0 +1,278 @@
+/* ============================================================
+   layout.css
+   الهيكل العام للتطبيق: sidebar + topbar + content area
+   ============================================================ */
+
+/* ── App Shell ── */
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+/* ══════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════ */
+.sidebar {
+  width: var(--sidebar-w);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 100;
+  transition: width 0.3s ease;  /* جاهز لـ collapse مستقبلاً */
+}
+
+/* اللوجو في أعلى الـ sidebar */
+.sidebar-logo {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.logo-icon {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--accent), var(--cyan));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.logo-text {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.logo-sub {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* Navigation items */
+.sidebar-nav {
+  flex: 1;
+  padding: 12px 0;
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.nav-item:hover {
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+
+.nav-icon {
+  width: 18px;
+  text-align: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+/* Data Sources في أسفل الـ sidebar */
+.sidebar-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.data-sources-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.data-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.ds-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  flex-shrink: 0;
+}
+
+/* ══════════════════════════════════════
+   TOP BAR
+══════════════════════════════════════ */
+.topbar {
+  height: var(--topbar-h);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 16px;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* العنوان الديناميكي اللي بيتغير مع كل صفحة */
+.page-title {
+  font-size: 17px;
+  font-weight: 700;
+  background: linear-gradient(90deg, var(--text-primary), var(--accent));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  white-space: nowrap;
+}
+
+/* Dropdowns في الـ topbar */
+.top-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.top-select:focus,
+.top-select:hover {
+  border-color: var(--border-bright);
+}
+
+/* User badge في اليمين */
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 20px;
+}
+
+.user-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.user-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.user-role {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+/* ══════════════════════════════════════
+   MAIN CONTENT WRAPPER
+══════════════════════════════════════ */
+.main-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;       /* الـ scroll يحصل داخل .content-area */
+  min-width: 0;           /* يمنع overflow في الـ flex */
+}
+
+.content-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+/* ── Pages ── */
+/* كل صفحة مخفية بالـ default، اللي عليها .active بس بتظهر */
+.page {
+  display: none;
+}
+
+.page.active {
+  display: block;
+  animation: fadeInUp 0.3s ease;
+}
+
+/* ── Grid helpers ── */
+.kpi-grid   { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+.two-col    { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.three-col  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.col-7-3    { display: grid; grid-template-columns: 7fr 3fr; gap: 16px; }
+.col-6-4    { display: grid; grid-template-columns: 6fr 4fr; gap: 16px; }
+
+/* ── Responsive breakpoints ── */
+@media (max-width: 1200px) {
+  .kpi-grid   { grid-template-columns: repeat(2, 1fr); }
+  .three-col  { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 900px) {
+  :root { --sidebar-w: 60px; }
+
+  .sidebar-logo .logo-text,
+  .sidebar-logo .logo-sub,
+  .nav-item span:not(.nav-icon),
+  .sidebar-footer .data-source span,
+  .data-sources-label { display: none; }
+
+  .nav-item { justify-content: center; padding: 12px; }
+  .two-col, .col-7-3, .col-6-4 { grid-template-columns: 1fr; }
+  .topbar-right .top-select { display: none; }
+}
+
+@media (max-width: 600px) {
+  .kpi-grid   { grid-template-columns: 1fr; }
+  .content-area { padding: 16px; }
+}

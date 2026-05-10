@@ -1,0 +1,309 @@
+/* ============================================================
+   components.css
+   كل الـ reusable components: cards, badges, tables,
+   progress bars, gauges, tooltips, etc.
+   ============================================================ */
+
+/* ══════════════════════════════════════
+   CARD — الوحدة الأساسية للـ UI
+══════════════════════════════════════ */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: border-color 0.2s;
+}
+
+.card:hover {
+  border-color: var(--border-bright);
+}
+
+.card-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── KPI Card ── */
+/* الكروت الكبيرة في أعلى كل صفحة */
+.kpi-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.kpi-card:hover {
+  border-color: var(--border-bright);
+  transform: translateY(-2px);
+}
+
+.kpi-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 8px;
+}
+
+.kpi-value {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 6px;
+}
+
+.kpi-sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.kpi-sub.up     { color: var(--accent); }
+.kpi-sub.warn   { color: var(--amber);  }
+.kpi-sub.danger { color: var(--red);    }
+
+/* ══════════════════════════════════════
+   SECTION HEADER
+══════════════════════════════════════ */
+.section-header {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* الشريط الأخضر على الشمال */
+.section-header::before {
+  content: '';
+  display: block;
+  width: 3px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+/* ══════════════════════════════════════
+   BADGE — التاجات الصغيرة
+══════════════════════════════════════ */
+.badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge-high   { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(239,68,68,0.3); }
+.badge-medium { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+.badge-low    { background: var(--accent-dim);color: var(--accent);border: 1px solid rgba(62,207,142,0.3); }
+.badge-blue   { background: rgba(34,211,238,0.1); color: var(--cyan); border: 1px solid rgba(34,211,238,0.3); }
+
+/* ══════════════════════════════════════
+   PROGRESS BAR
+══════════════════════════════════════ */
+.progress-bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.8s ease;
+}
+
+.progress-fill.green { background: linear-gradient(90deg, var(--accent), var(--cyan)); }
+.progress-fill.red   { background: var(--red);   }
+.progress-fill.amber { background: var(--amber); }
+.progress-fill.blue  { background: var(--cyan);  }
+
+/* ══════════════════════════════════════
+   DATA TABLE
+══════════════════════════════════════ */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 12px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid rgba(99, 225, 180, 0.05);
+  vertical-align: middle;
+}
+
+.data-table tr:hover td {
+  background: var(--accent-dim);
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ══════════════════════════════════════
+   RISK SCORE BAR (في جدول الـ injury)
+══════════════════════════════════════ */
+.risk-score-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.risk-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.risk-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+
+/* ══════════════════════════════════════
+   FACTORS ITEM (win prob / injury shap)
+══════════════════════════════════════ */
+.factors-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.factors-item:last-child {
+  border-bottom: none;
+}
+
+.factor-name {
+  font-size: 13px;
+  flex: 0 0 180px;
+  color: var(--text-secondary);
+}
+
+.factor-bar-wrap { flex: 1; }
+
+.factor-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  flex: 0 0 80px;
+  text-align: right;
+}
+
+/* ══════════════════════════════════════
+   INLINE STAT ROW
+══════════════════════════════════════ */
+.inline-stat {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.inline-stat-label { font-size: 12px; color: var(--text-secondary); }
+.inline-stat-val   { font-size: 13px; font-weight: 700; }
+
+/* ══════════════════════════════════════
+   PLAYER LIST ITEM (team cohesion)
+══════════════════════════════════════ */
+.player-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.player-list-item:last-child {
+  border-bottom: none;
+}
+
+.player-list-name { font-weight: 600; font-size: 13px; }
+.player-list-role { font-size: 11px; color: var(--text-secondary); }
+.player-centrality { font-size: 16px; font-weight: 700; color: var(--cyan); text-align: right; }
+
+/* ══════════════════════════════════════
+   CHART WRAPPER
+══════════════════════════════════════ */
+.chart-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.chart-wrap canvas {
+  width: 100% !important;
+}
+
+/* ══════════════════════════════════════
+   TOOLTIP
+══════════════════════════════════════ */
+.tooltip {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-card);
+  border: 1px solid var(--border-bright);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  pointer-events: none;
+  display: none;
+  max-width: 200px;
+  box-shadow: var(--shadow);
+  line-height: 1.5;
+}
+
+/* ══════════════════════════════════════
+   ACCURACY NUMBERS (win prob page)
+══════════════════════════════════════ */
+.accuracy-nums {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.acc-num { text-align: center; }
+
+.acc-val {
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.acc-val.pos { color: var(--accent); }
+.acc-val.neg { color: var(--red);    }
+
+.acc-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-top: 4px;
+}
