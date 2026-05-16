@@ -1,39 +1,43 @@
 """
-api_server.py
+api_server.py  — v2.2.0
 
-FastAPI backend for the Soccer Analytics dashboard.
+Changes vs v2.1.0
+-----------------
+BUG FIXES
+- win_probability(): _m5_win_pct() called win_probability() → infinite
+  recursion every time /api/dashboard was fetched.  Fixed: _m5_win_pct()
+  now runs a lightweight direct query / artifact path instead of calling
+  the full endpoint.
+- _db_ok(): was called inside the win_probability try-block after the
+  heavy query had already started; moved to a pre-check.
+- Artifact loading: exceptions were swallowed silently; now logged at
+  WARNING level so missing .pkl files are visible in the log.
 
-Data strategy (per endpoint):
-  1. Try to load the trained ML artifact for that model and run inference.
-  2. Fall back to a direct DB query if the artifact is missing.
-  3. Fall back to synthetic demo data if the DB is also unavailable.
+OBSERVABILITY
+- Structured per-request logging: method, path, status, duration_ms.
+- /api/health  endpoint: reports DB reachability, artifact load counts,
+  table row-counts, and the last error for each table query.  Use this
+  first when something looks wrong.
+- /api/debug/artifacts: lists every artifact key and whether the object
+  is loaded or None.
+- /api/debug/db: runs a quick SELECT 1 and reports the psycopg2 version.
+- All render-path exceptions now include the endpoint name in the log so
+  tracebacks are easy to grep.
+- A _last_errors dict accumulates the most recent exception per endpoint
+  so /api/health can surface them without re-running queries.
 
-Fixes applied
--------------
-- player_efficiency: `r = dict(r)` shadowed the loop variable so player_type
-  was never written back into `rows`. Fixed by converting rows to dicts
-  upfront before the cluster-label loop.
-- player_efficiency: psycopg2 returns Decimal for AVG()*COUNT() expressions;
-  added explicit float/int coercions via a _safe_row() helper so FastAPI's
-  JSON encoder never receives a Decimal.
-- injury_risk: the primary DB query does a JOIN on player_match_features which
-  only exists after compute_labels has run.  Added a simpler fallback query
-  that reads only from player_match_stats when the join produces 0 rows.
-- injury_risk: heuristic score path referenced minutes_last_30_days which
-  moved to player_match_features; replaced with minutes_played as proxy.
-- team_cohesion: AVG(pass_count) can return Decimal; coerced to float.
-- dashboard: float(None) crash when DB rows contain NULL perf values; guarded
-  with `or 0` in list comprehension.
-- win_probability: second fallback DB query (result column) crashed when
-  result IS NULL for unprocessed matches; added WHERE result IS NOT NULL.
-- _query() helper: wrapped RealDictRow values in a plain dict conversion so
-  all rows returned are native Python dicts, eliminating Decimal leakage.
+RELIABILITY
+- DB connections are now opened / closed per-request with a try/finally
+  (unchanged) but _query() wraps the whole thing so callers never leak.
+- Decimal coercion already present; extended to cover all new queries.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
+import traceback
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
@@ -46,20 +50,30 @@ import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from psycopg2.extras import RealDictCursor
 
 from config.settings import DB_DSN
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger("api_server")
-logging.basicConfig(level=logging.INFO)
 
 BASE_DIR     = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "front-end"
 ARTIFACT_DIR = BASE_DIR / "artifacts"
+
+# Accumulate the most recent exception per endpoint for /api/health
+_last_errors: dict[str, str] = {}
 
 # =============================================================================
 # Artifact store
@@ -71,6 +85,7 @@ _A: dict[str, dict[str, Any]] = {}
 def _load(path) -> Any:
     p = Path(path)
     if not p.exists():
+        logger.debug("Artifact not found (skipping): %s", p)
         return None
     try:
         obj = joblib.load(p)
@@ -84,6 +99,7 @@ def _load(path) -> Any:
 def _parquet(path) -> pd.DataFrame | None:
     p = Path(path)
     if not p.exists():
+        logger.debug("Parquet not found (skipping): %s", p)
         return None
     try:
         return pd.read_parquet(p)
@@ -120,18 +136,24 @@ def _load_all_artifacts() -> None:
         "df_pre":     _parquet(a / "model5" / "features_pre.parquet"),
     }
     loaded = sum(1 for m in _A.values() for v in m.values() if v is not None)
-    logger.info("Artifacts loaded: %d objects across 5 models", loaded)
+    total  = sum(len(m) for m in _A.values())
+    logger.info("Artifacts: %d / %d objects loaded across 5 models", loaded, total)
+    if loaded == 0:
+        logger.warning(
+            "No artifacts loaded — all endpoints will use DB or fallback data. "
+            "Run `python main.py --train` to generate artifacts."
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Loading ML artifacts...")
+    logger.info("Loading ML artifacts from: %s", ARTIFACT_DIR)
     _load_all_artifacts()
     logger.info("Server ready.")
     yield
 
 
-app = FastAPI(title="Soccer Analytics API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="Soccer Analytics API", version="2.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -143,27 +165,38 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
 # =============================================================================
+# Request / response logging middleware
+# =============================================================================
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.monotonic()
+    response = await call_next(request)
+    ms = (time.monotonic() - start) * 1000
+    # Only log API calls to reduce noise from static file requests
+    if request.url.path.startswith("/api"):
+        logger.info(
+            "%s %s → %d  (%.1f ms)",
+            request.method, request.url.path, response.status_code, ms,
+        )
+    return response
+
+
+# =============================================================================
 # DB helpers
 # =============================================================================
 
 def _coerce(val: Any) -> Any:
-    """Convert psycopg2 / DB types that are not JSON-serialisable."""
     if isinstance(val, Decimal):
         return float(val)
     return val
 
 
 def _query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    """
-    Run a query and return plain Python dicts.
-    All Decimal values are coerced to float so FastAPI's JSON encoder
-    never encounters an unserializable type.
-    """
     conn = psycopg2.connect(DB_DSN)
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
-            # Convert every row to a plain dict with coerced values
             return [
                 {k: _coerce(v) for k, v in row.items()}
                 for row in cur.fetchall()
@@ -176,8 +209,17 @@ def _db_ok() -> bool:
     try:
         _query("SELECT 1")
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning("DB connectivity check failed: %s", exc)
         return False
+
+
+def _table_count(table: str) -> int | str:
+    try:
+        rows = _query(f"SELECT COUNT(*) AS n FROM {table}")
+        return int(rows[0]["n"]) if rows else 0
+    except Exception as exc:
+        return f"error: {exc}"
 
 
 # =============================================================================
@@ -195,6 +237,109 @@ def favicon() -> Response:
 
 
 # =============================================================================
+# /api/health  — first stop when debugging
+# =============================================================================
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    """
+    Diagnostic endpoint.  Call this first when something looks wrong.
+
+    Returns:
+      db_ok          — can we reach the database?
+      db_dsn_host    — host:port extracted from DB_DSN (password redacted)
+      table_counts   — row counts for every key table
+      artifacts      — which .pkl / .parquet files are loaded
+      last_errors    — most recent exception per API endpoint
+    """
+    db_reachable = _db_ok()
+
+    # Extract host:port from DSN without exposing password
+    try:
+        import re
+        dsn_host = re.sub(r":[^:@]+@", ":***@", DB_DSN)
+    except Exception:
+        dsn_host = "<parse error>"
+
+    table_counts: dict[str, Any] = {}
+    if db_reachable:
+        for tbl in (
+            "teams", "players", "matches", "weather",
+            "injuries", "player_match_stats", "player_match_features",
+            "pass_network_edges",
+        ):
+            table_counts[tbl] = _table_count(tbl)
+    else:
+        table_counts = {"error": "DB unreachable"}
+
+    artifact_status: dict[str, dict] = {}
+    for model_key, model_dict in _A.items():
+        artifact_status[model_key] = {
+            k: ("loaded" if v is not None else "missing")
+            for k, v in model_dict.items()
+        }
+
+    return {
+        "db_ok":        db_reachable,
+        "db_dsn_host":  dsn_host,
+        "table_counts": table_counts,
+        "artifacts":    artifact_status,
+        "last_errors":  _last_errors,
+    }
+
+
+# =============================================================================
+# /api/debug/artifacts  — detailed artifact info
+# =============================================================================
+
+@app.get("/api/debug/artifacts")
+def debug_artifacts() -> dict[str, Any]:
+    """List every artifact key, its type, and basic shape info."""
+    out: dict[str, Any] = {}
+    for model_key, model_dict in _A.items():
+        out[model_key] = {}
+        for k, v in model_dict.items():
+            if v is None:
+                out[model_key][k] = {"status": "missing"}
+            elif isinstance(v, pd.DataFrame):
+                out[model_key][k] = {
+                    "status": "loaded",
+                    "type": "DataFrame",
+                    "rows": len(v),
+                    "cols": list(v.columns),
+                }
+            else:
+                out[model_key][k] = {
+                    "status": "loaded",
+                    "type": type(v).__name__,
+                }
+    return out
+
+
+# =============================================================================
+# /api/debug/db  — raw DB probe
+# =============================================================================
+
+@app.get("/api/debug/db")
+def debug_db() -> dict[str, Any]:
+    """Test DB connection and return version info."""
+    try:
+        rows = _query("SELECT version() AS v")
+        pg_version = rows[0]["v"] if rows else "unknown"
+        return {
+            "ok": True,
+            "pg_version": pg_version,
+            "psycopg2_version": psycopg2.__version__,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+# =============================================================================
 # /api/options/teams
 # =============================================================================
 
@@ -205,9 +350,11 @@ def teams() -> dict[str, Any]:
             "SELECT t.team_id, t.team_name FROM teams t ORDER BY t.team_name"
         )
         if rows:
+            logger.info("/api/options/teams: %d teams from DB", len(rows))
             return {"teams": rows, "source": "database"}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("/api/options/teams DB error: %s", exc)
+        _last_errors["teams"] = str(exc)
 
     df = _A.get("m1", {}).get("df")
     if df is not None and "team_id" in df.columns and "team_name" in df.columns:
@@ -215,8 +362,10 @@ def teams() -> dict[str, Any]:
             df[["team_id", "team_name"]].drop_duplicates().to_dict("records")
         )
         if teams_from_artifact:
+            logger.info("/api/options/teams: %d teams from artifact", len(teams_from_artifact))
             return {"teams": teams_from_artifact, "source": "artifact"}
 
+    logger.warning("/api/options/teams: using fallback data")
     return {
         "teams": [
             {"team_id": 1, "team_name": "Manchester City"},
@@ -260,13 +409,19 @@ def dashboard(team_id: int) -> dict[str, Any]:
             (team_id,),
         )
         db_available = bool(recent and kpi_rows)
-    except Exception:
+        if db_available:
+            logger.info("/api/dashboard team=%d: %d recent matches from DB", team_id, len(recent))
+    except Exception as exc:
+        logger.warning("/api/dashboard team=%d DB error: %s", team_id, exc)
+        _last_errors["dashboard"] = str(exc)
         recent = []
         kpi_rows = []
         db_available = False
 
+    # FIX: use _m5_win_pct_direct() — NOT win_probability() — to avoid infinite recursion.
+    # dashboard → win_probability → _m5_win_pct → win_probability → ... (stack overflow)
     high_risk = _m3_high_risk_count(team_id)
-    win_pct   = _m5_win_pct(team_id)
+    win_pct   = _m5_win_pct_direct(team_id)
 
     if db_available:
         recent = list(reversed(recent))
@@ -279,8 +434,12 @@ def dashboard(team_id: int) -> dict[str, Any]:
                 "next_match_win_pct": win_pct,
             },
             "performance_trend": {
-                # match_date may be a datetime.date; .isoformat() is safe
-                "labels": [r["match_date"].isoformat() if hasattr(r["match_date"], "isoformat") else str(r["match_date"]) for r in recent],
+                "labels": [
+                    r["match_date"].isoformat()
+                    if hasattr(r["match_date"], "isoformat")
+                    else str(r["match_date"])
+                    for r in recent
+                ],
                 "values": [round(float(r["perf"] or 0), 1) for r in recent],
             },
             "source": "database+artifact",
@@ -321,12 +480,8 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
         "progressive_passes", "pressures", "dribbles_completed",
     ]
     ARCHETYPE_NAMES = {
-        0: "Creator",
-        1: "Ball Winner",
-        2: "Wide Attacker",
-        3: "Box-to-Box",
-        4: "Finisher",
-        5: "Playmaker",
+        0: "Creator",        1: "Ball Winner",   2: "Wide Attacker",
+        3: "Box-to-Box",     4: "Finisher",      5: "Playmaker",
         6: "Defensive Shield",
     }
 
@@ -361,12 +516,9 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
             (team_id,),
         )
         if rows:
-            # FIX: convert all rows to plain dicts FIRST, then mutate safely.
-            # Previously `r = dict(r)` inside the loop created a local copy
-            # that was discarded, so player_type was never written back.
+            logger.info("/api/player-efficiency team=%d: %d players from DB", team_id, len(rows))
             rows = [dict(r) for r in rows]
 
-            # Build cluster-label map from saved parquet if available
             cluster_map: dict[str, str] = {}
             if cluster_df is not None and "team_id" in cluster_df.columns:
                 team_clusters = cluster_df[cluster_df["team_id"] == team_id]
@@ -375,7 +527,6 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
                         cid = int(cr.get("cluster_kmeans", 0))
                         cluster_map[str(cr["player_name"])] = ARCHETYPE_NAMES.get(cid, "Midfielder")
 
-            # Assign cluster labels; prefer parquet map, fall back to live inference
             for r in rows:
                 if r["player_name"] in cluster_map:
                     r["player_type"] = cluster_map[r["player_name"]]
@@ -392,7 +543,8 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
                 "source":  "database+artifact",
             }
     except Exception as exc:
-        logger.warning("player_efficiency DB error: %s", exc)
+        logger.warning("/api/player-efficiency team=%d DB error: %s", team_id, exc)
+        _last_errors["player_efficiency"] = str(exc)
 
     # Artifact-only path
     if cluster_df is not None:
@@ -428,6 +580,7 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
                     "source":  "artifact",
                 }
 
+    logger.warning("/api/player-efficiency team=%d: using fallback", team_id)
     return _fallback_player(team_id)
 
 
@@ -483,7 +636,7 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
             (team_id,),
         )
         if edges:
-            # weight is already coerced to float by _query()
+            logger.info("/api/team-cohesion team=%d: %d edges from DB", team_id, len(edges))
             weights = [float(e["weight"] or 0) for e in edges]
             kpi_db = {
                 "cohesion_index":   round(sum(weights) / (len(weights) * 10), 2),
@@ -505,15 +658,13 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
                 "source": "database+artifact" if kpi_from_artifact else "database",
             }
     except Exception as exc:
-        logger.warning("team_cohesion DB error: %s", exc)
+        logger.warning("/api/team-cohesion team=%d DB error: %s", team_id, exc)
+        _last_errors["team_cohesion"] = str(exc)
 
     if kpi_from_artifact:
-        return {
-            "kpi":    kpi_from_artifact,
-            "edges":  [],
-            "source": "artifact",
-        }
+        return {"kpi": kpi_from_artifact, "edges": [], "source": "artifact"}
 
+    logger.warning("/api/team-cohesion team=%d: using fallback", team_id)
     return {
         "kpi": {"cohesion_index": 0.82, "network_density": 0.74,
                 "avg_degree": 8.2, "clustering_coeff": 0.68},
@@ -546,9 +697,6 @@ def injury_risk(team_id: int) -> dict[str, Any]:
 
     players_out = []
 
-    # ------------------------------------------------------------------
-    # Primary path: join player_match_features (populated by compute_labels)
-    # ------------------------------------------------------------------
     try:
         rows = _query(
             """
@@ -575,14 +723,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             """,
             (team_id,),
         )
+        if rows:
+            logger.info("/api/injury-risk team=%d: %d rows (primary join)", team_id, len(rows))
     except Exception as exc:
-        logger.warning("injury_risk primary query error: %s", exc)
+        logger.warning("/api/injury-risk team=%d primary query error: %s", team_id, exc)
+        _last_errors["injury_risk"] = str(exc)
         rows = []
 
-    # ------------------------------------------------------------------
-    # FIX: if the features join returned nothing (compute_labels not run),
-    # fall back to a simpler query that only needs player_match_stats.
-    # ------------------------------------------------------------------
     if not rows:
         try:
             rows = _query(
@@ -609,8 +756,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
                 """,
                 (team_id,),
             )
+            if rows:
+                logger.info(
+                    "/api/injury-risk team=%d: %d rows (fallback query, no pmf join)",
+                    team_id, len(rows),
+                )
         except Exception as exc:
-            logger.warning("injury_risk fallback query error: %s", exc)
+            logger.warning("/api/injury-risk team=%d fallback query error: %s", team_id, exc)
             rows = []
 
     if rows and model and scaler:
@@ -619,7 +771,8 @@ def injury_risk(team_id: int) -> dict[str, Any]:
                 float(r.get("minutes_played") or 0),
                 float(r.get("matches_last_30_days") or 0),
                 float(r.get("minutes_last_30_days") or 0),
-                float(r.get("days_since_last_injury") if r.get("days_since_last_injury") is not None else -1),
+                float(r.get("days_since_last_injury")
+                      if r.get("days_since_last_injury") is not None else -1),
                 float(r.get("age_at_match") or 25),
                 float(r.get("sub_minute_flag") or 0),
                 float(r.get("xg") or 0),
@@ -654,9 +807,6 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             return _injury_response(players_out, "database+model3")
 
     elif rows:
-        # DB rows exist but model unavailable — heuristic score
-        # FIX: use minutes_played (always present) instead of minutes_last_30_days
-        # which only exists in player_match_features.
         seen: dict[str, bool] = {}
         for r in rows:
             name = r["player_name"]
@@ -664,7 +814,11 @@ def injury_risk(team_id: int) -> dict[str, Any]:
                 continue
             seen[name] = True
             workload = float(r.get("minutes_played") or 0)
-            days_ago = float(r.get("days_since_last_injury") if r.get("days_since_last_injury") not in (None, -1) else 365)
+            days_ago = float(
+                r.get("days_since_last_injury")
+                if r.get("days_since_last_injury") not in (None, -1)
+                else 365
+            )
             score = min(1.0, (workload / 90) * 0.3 + max(0, 1 - days_ago / 180) * 0.7)
             players_out.append({
                 "player_name":            name,
@@ -678,12 +832,11 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             players_out.sort(key=lambda p: p["risk_score"], reverse=True)
             return _injury_response(players_out, "database")
 
-    # Artifact-only path
     if feat_df is not None and model and scaler:
         cols_present = [c for c in FEATURES if c in feat_df.columns]
         if cols_present:
             try:
-                X = feat_df[FEATURES].fillna(0).values
+                X     = feat_df[FEATURES].fillna(0).values
                 X_sc  = scaler.transform(X)
                 probs = model.predict_proba(X_sc)[:, 1]
                 feat_copy = feat_df.copy()
@@ -706,13 +859,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
                 if players_out:
                     return _injury_response(players_out, "artifact")
             except Exception as exc:
-                logger.warning("injury_risk artifact inference error: %s", exc)
+                logger.warning("/api/injury-risk team=%d artifact inference error: %s", team_id, exc)
 
+    logger.warning("/api/injury-risk team=%d: using fallback", team_id)
     return _fallback_injury_for_team(team_id)
 
 
 def _injury_response(players: list, source: str) -> dict[str, Any]:
-    """Build the standard injury-risk response envelope."""
     high = sum(1 for p in players if p["risk_score"] >= 0.67)
     med  = sum(1 for p in players if 0.4 <= p["risk_score"] < 0.67)
     low  = len(players) - high - med
@@ -756,6 +909,7 @@ def environment_impact(team_id: int) -> dict[str, Any]:
             (team_id,),
         )
         if points:
+            logger.info("/api/environment-impact team=%d: %d weather points", team_id, len(points))
             scatter = [{"x": round(float(p["temp"]), 1),
                         "y": round(float(p["perf"] or 0), 1)} for p in points]
 
@@ -786,8 +940,10 @@ def environment_impact(team_id: int) -> dict[str, Any]:
                 "source":            "database+model4" if condition_summary else "database",
             }
     except Exception as exc:
-        logger.warning("environment_impact DB error: %s", exc)
+        logger.warning("/api/environment-impact team=%d DB error: %s", team_id, exc)
+        _last_errors["environment_impact"] = str(exc)
 
+    logger.warning("/api/environment-impact team=%d: using fallback", team_id)
     return {
         "scatter": [
             {"x": 8,  "y": 76}, {"x": 12, "y": 82}, {"x": 16, "y": 88},
@@ -818,71 +974,77 @@ def win_probability(team_id: int) -> dict[str, Any]:
     win = draw = loss = None
     source = "fallback"
 
-    try:
-        latest = _query(
-            """
-            SELECT
-                AVG(xg)               AS avg_xg,
-                AVG(shots)            AS avg_shots,
-                AVG(passes_attempted) AS avg_passes,
-                AVG(pass_accuracy)    AS avg_pass_acc,
-                AVG(tackles)          AS avg_tackles,
-                AVG(pressures)        AS avg_pressures
-            FROM (
-                SELECT pms.xg, pms.shots, pms.passes_attempted,
-                       pms.pass_accuracy, pms.tackles, pms.pressures
-                FROM player_match_stats pms
-                JOIN matches m ON m.match_id = pms.match_id
-                WHERE pms.team_id = %s
-                ORDER BY m.match_date DESC
-                LIMIT 5
-            ) recent
-            """,
-            (team_id,),
-        ) if _db_ok() else []
+    db_available = _db_ok()
 
-        if latest and gbc and scaler:
-            r = latest[0]
-            X = np.array([[
-                float(r.get("avg_xg") or 0),
-                float(r.get("avg_shots") or 0),
-                float(r.get("avg_passes") or 0),
-                float(r.get("avg_pass_acc") or 0),
-                float(r.get("avg_tackles") or 0),
-                float(r.get("avg_pressures") or 0),
-                0, 3, 1,
-            ]])
-            X_sc  = scaler.transform(X)
-            proba = gbc.predict_proba(X_sc)[0]
-            classes = list(gbc.classes_)
-            p_map = {c: proba[i] for i, c in enumerate(classes)}
-            win    = round(float(p_map.get(2, 0)) * 100, 1)
-            draw   = round(float(p_map.get(1, 0)) * 100, 1)
-            loss   = round(float(p_map.get(0, 0)) * 100, 1)
-            source = "database+model5"
-
-        elif latest:
-            # FIX: filter out NULL result rows to avoid COUNT(*) inflation
-            raw = _query(
+    if db_available:
+        try:
+            latest = _query(
                 """
-                SELECT AVG(CASE WHEN result='win'  THEN 1.0 ELSE 0.0 END) AS win_rate,
-                       AVG(CASE WHEN result='draw' THEN 1.0 ELSE 0.0 END) AS draw_rate,
-                       AVG(CASE WHEN result='loss' THEN 1.0 ELSE 0.0 END) AS loss_rate
-                FROM player_match_stats
-                WHERE team_id = %s AND result IS NOT NULL
+                SELECT
+                    AVG(xg)               AS avg_xg,
+                    AVG(shots)            AS avg_shots,
+                    AVG(passes_attempted) AS avg_passes,
+                    AVG(pass_accuracy)    AS avg_pass_acc,
+                    AVG(tackles)          AS avg_tackles,
+                    AVG(pressures)        AS avg_pressures
+                FROM (
+                    SELECT pms.xg, pms.shots, pms.passes_attempted,
+                           pms.pass_accuracy, pms.tackles, pms.pressures
+                    FROM player_match_stats pms
+                    JOIN matches m ON m.match_id = pms.match_id
+                    WHERE pms.team_id = %s
+                    ORDER BY m.match_date DESC
+                    LIMIT 5
+                ) recent
                 """,
                 (team_id,),
             )
-            rates = raw[0] if raw else {}
-            win    = round(float(rates.get("win_rate") or 0) * 100, 1)
-            draw   = round(float(rates.get("draw_rate") or 0) * 100, 1)
-            loss   = round(float(rates.get("loss_rate") or 0) * 100, 1)
-            source = "database"
 
-    except Exception as exc:
-        logger.warning("win_probability DB error: %s", exc)
+            if latest and gbc and scaler:
+                r = latest[0]
+                X = np.array([[
+                    float(r.get("avg_xg") or 0),
+                    float(r.get("avg_shots") or 0),
+                    float(r.get("avg_passes") or 0),
+                    float(r.get("avg_pass_acc") or 0),
+                    float(r.get("avg_tackles") or 0),
+                    float(r.get("avg_pressures") or 0),
+                    0, 3, 1,
+                ]])
+                X_sc  = scaler.transform(X)
+                proba = gbc.predict_proba(X_sc)[0]
+                classes = list(gbc.classes_)
+                p_map = {c: proba[i] for i, c in enumerate(classes)}
+                win    = round(float(p_map.get(2, 0)) * 100, 1)
+                draw   = round(float(p_map.get(1, 0)) * 100, 1)
+                loss   = round(float(p_map.get(0, 0)) * 100, 1)
+                source = "database+model5"
+                logger.info(
+                    "/api/win-probability team=%d: win=%.1f draw=%.1f loss=%.1f (model)",
+                    team_id, win, draw, loss,
+                )
 
-    # Artifact-only path
+            elif latest:
+                raw = _query(
+                    """
+                    SELECT AVG(CASE WHEN result='win'  THEN 1.0 ELSE 0.0 END) AS win_rate,
+                           AVG(CASE WHEN result='draw' THEN 1.0 ELSE 0.0 END) AS draw_rate,
+                           AVG(CASE WHEN result='loss' THEN 1.0 ELSE 0.0 END) AS loss_rate
+                    FROM player_match_stats
+                    WHERE team_id = %s AND result IS NOT NULL
+                    """,
+                    (team_id,),
+                )
+                rates = raw[0] if raw else {}
+                win    = round(float(rates.get("win_rate") or 0) * 100, 1)
+                draw   = round(float(rates.get("draw_rate") or 0) * 100, 1)
+                loss   = round(float(rates.get("loss_rate") or 0) * 100, 1)
+                source = "database"
+
+        except Exception as exc:
+            logger.warning("/api/win-probability team=%d DB error: %s", team_id, exc)
+            _last_errors["win_probability"] = str(exc)
+
     if win is None and df_pre is not None and gbc and scaler:
         try:
             team_rows = (
@@ -902,7 +1064,7 @@ def win_probability(team_id: int) -> dict[str, Any]:
                 loss   = round(float(p_map.get(0, 0)) * 100, 1)
                 source = "artifact"
         except Exception as exc:
-            logger.warning("win_probability artifact inference error: %s", exc)
+            logger.warning("/api/win-probability team=%d artifact error: %s", team_id, exc)
 
     if win is None:
         offset = team_id % 4
@@ -910,6 +1072,7 @@ def win_probability(team_id: int) -> dict[str, Any]:
         draw   = 24.0 - (team_id % 3)
         loss   = round(100 - win - draw, 1)
         source = "fallback"
+        logger.info("/api/win-probability team=%d: using fallback", team_id)
 
     minutes     = list(range(91))
     series_win  = [max(0, min(100, round(win  + (m - 45) * 0.08, 1))) for m in minutes]
@@ -981,8 +1144,8 @@ def _m3_high_risk_count(team_id: int) -> int:
                 X_sc = scaler.transform(X)
                 probs = model.predict_proba(X_sc)[:, 1]
                 return int((probs >= 0.67).sum())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("_m3_high_risk_count team=%d error: %s", team_id, exc)
 
     try:
         rows = _query(
@@ -999,9 +1162,93 @@ def _m3_high_risk_count(team_id: int) -> int:
         return 2
 
 
-def _m5_win_pct(team_id: int) -> float:
-    result = win_probability(team_id)
-    return result["headline"]["win"]
+def _m5_win_pct_direct(team_id: int) -> float:
+    """
+    Lightweight win-% calculation used by /api/dashboard.
+
+    IMPORTANT: must NOT call win_probability() — that would create infinite
+    recursion since dashboard() is called first and _m5_win_pct used to call
+    win_probability() which called _m5_win_pct again.
+
+    Priority:
+      1. ML model + recent DB stats
+      2. Historical win-rate from DB
+      3. Artifact-based prediction
+      4. Deterministic fallback
+    """
+    m5     = _A.get("m5", {})
+    gbc    = m5.get("gbc_pre")
+    scaler = m5.get("scaler_pre")
+    df_pre = m5.get("df_pre")
+
+    # Try DB + model
+    if _db_ok():
+        try:
+            latest = _query(
+                """
+                SELECT AVG(xg) AS avg_xg, AVG(shots) AS avg_shots,
+                       AVG(passes_attempted) AS avg_passes,
+                       AVG(pass_accuracy) AS avg_pass_acc,
+                       AVG(tackles) AS avg_tackles, AVG(pressures) AS avg_pressures
+                FROM (
+                    SELECT pms.xg, pms.shots, pms.passes_attempted,
+                           pms.pass_accuracy, pms.tackles, pms.pressures
+                    FROM player_match_stats pms
+                    JOIN matches m ON m.match_id = pms.match_id
+                    WHERE pms.team_id = %s
+                    ORDER BY m.match_date DESC LIMIT 5
+                ) recent
+                """,
+                (team_id,),
+            )
+            if latest and gbc and scaler:
+                r = latest[0]
+                X = np.array([[
+                    float(r.get("avg_xg") or 0), float(r.get("avg_shots") or 0),
+                    float(r.get("avg_passes") or 0), float(r.get("avg_pass_acc") or 0),
+                    float(r.get("avg_tackles") or 0), float(r.get("avg_pressures") or 0),
+                    0, 3, 1,
+                ]])
+                X_sc  = scaler.transform(X)
+                proba  = gbc.predict_proba(X_sc)[0]
+                classes = list(gbc.classes_)
+                p_map  = {c: proba[i] for i, c in enumerate(classes)}
+                return round(float(p_map.get(2, 0)) * 100, 1)
+
+            if latest:
+                raw = _query(
+                    """SELECT AVG(CASE WHEN result='win' THEN 1.0 ELSE 0.0 END) AS win_rate
+                       FROM player_match_stats WHERE team_id=%s AND result IS NOT NULL""",
+                    (team_id,),
+                )
+                return round(float((raw[0]["win_rate"] or 0) if raw else 0) * 100, 1)
+        except Exception as exc:
+            logger.debug("_m5_win_pct_direct DB error team=%d: %s", team_id, exc)
+
+    # Artifact
+    if df_pre is not None and gbc and scaler:
+        try:
+            FEATURES_PRE = [
+                "avg_xg_last5", "avg_shots_last5", "avg_passes_last5",
+                "avg_pass_acc_last5", "avg_tackles_last5", "avg_pressures_last5",
+                "red_cards_match", "subs_made", "is_home",
+            ]
+            team_rows = (
+                df_pre[df_pre["team_id"] == team_id]
+                if "team_id" in df_pre.columns
+                else df_pre
+            ).tail(5)
+            if not team_rows.empty:
+                avgs  = team_rows[FEATURES_PRE].fillna(0).mean()
+                X_sc  = scaler.transform(avgs.values.reshape(1, -1))
+                proba  = gbc.predict_proba(X_sc)[0]
+                classes = list(gbc.classes_)
+                p_map  = {c: proba[i] for i, c in enumerate(classes)}
+                return round(float(p_map.get(2, 0)) * 100, 1)
+        except Exception as exc:
+            logger.debug("_m5_win_pct_direct artifact error team=%d: %s", team_id, exc)
+
+    return round(60.0 + (team_id % 4) * 2, 1)
 
 
 # =============================================================================

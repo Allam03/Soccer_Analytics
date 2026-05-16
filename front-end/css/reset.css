@@ -1,7 +1,8 @@
-/* ============================================================
+/* =============================================================================
    reset.css
-   إعادة ضبط الـ browser defaults — يتحمّل أول حاجة
-   ============================================================ */
+   Browser default overrides and global base styles.
+   Loaded first — no component-specific rules go here.
+   ============================================================================= */
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -14,13 +15,14 @@ html, body {
 }
 
 body {
-  font-family: 'DM Sans', sans-serif;
-  background: var(--bg-primary);
+  font-family: var(--font-body);
+  background: var(--bg-page);
   color: var(--text-primary);
   font-size: 14px;
-  line-height: 1.5;
-  overflow: hidden;            /* الـ scroll داخل .content-area بس */
+  line-height: 1.55;
+  overflow: hidden;         /* scrolling happens inside .content-area only */
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
@@ -37,52 +39,85 @@ button {
   border: none;
   background: none;
   font-family: inherit;
+  font-size: inherit;
 }
 
-select, input {
+select, input, textarea {
   font-family: inherit;
+  font-size: inherit;
 }
 
-/* ── Scrollbar مخصص ── */
-::-webkit-scrollbar        { width: 5px; }
-::-webkit-scrollbar-track  { background: var(--bg-secondary); }
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar        { width: 4px; height: 4px; }
+::-webkit-scrollbar-track  { background: transparent; }
 ::-webkit-scrollbar-thumb  {
   background: var(--border-bright);
-  border-radius: 3px;
+  border-radius: 2px;
 }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 
-/* ── Utility classes ── */
+/* =============================================================================
+   Utility classes
+   ============================================================================= */
+
+/* Spacing */
+.mt-4  { margin-top:  4px;  }
 .mt-8  { margin-top:  8px;  }
+.mt-12 { margin-top:  12px; }
 .mt-16 { margin-top:  16px; }
 .mt-24 { margin-top:  24px; }
+.mb-4  { margin-bottom:  4px;  }
 .mb-8  { margin-bottom:  8px;  }
-.mb-16 { margin-bottom: 16px; }
-.mb-24 { margin-bottom: 24px; }
+.mb-12 { margin-bottom:  12px; }
+.mb-16 { margin-bottom:  16px; }
+.mb-24 { margin-bottom:  24px; }
 
-.text-accent   { color: var(--accent); }
-.text-cyan     { color: var(--cyan);   }
-.text-amber    { color: var(--amber);  }
-.text-red      { color: var(--red);    }
-.text-muted    { color: var(--text-secondary); }
-.text-center   { text-align: center; }
-.fw-700        { font-weight: 700; }
-.fs-11         { font-size: 11px; }
-.fs-12         { font-size: 12px; }
-.fs-13         { font-size: 13px; }
+/* Text color shortcuts */
+.text-accent   { color: var(--accent);          }
+.text-cyan     { color: var(--cyan);            }
+.text-amber    { color: var(--amber);           }
+.text-red      { color: var(--red);             }
+.text-muted    { color: var(--text-secondary);  }
+.text-center   { text-align: center;            }
+.text-right    { text-align: right;             }
 
+/* Text size shortcuts */
+.fs-10 { font-size: 10px; }
+.fs-11 { font-size: 11px; }
+.fs-12 { font-size: 12px; }
+.fs-13 { font-size: 13px; }
+
+/* Font weight */
+.fw-500 { font-weight: 500; }
+.fw-600 { font-weight: 600; }
+.fw-700 { font-weight: 700; }
+
+/* Monospace numbers */
+.mono { font-family: var(--font-mono); }
+
+/* Divider */
 .divider {
   height: 1px;
   background: var(--border);
   margin: 16px 0;
 }
 
-/* ── Page fade animation ── */
+/* =============================================================================
+   Animations
+   ============================================================================= */
+
+/* Page transition */
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0);    }
 }
 
-/* ── Shimmer loading ── */
+/* Shimmer loading skeleton */
 @keyframes shimmer {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
@@ -91,11 +126,29 @@ select, input {
 .shimmer {
   background: linear-gradient(
     90deg,
-    var(--bg-card) 25%,
+    var(--bg-card)       25%,
     var(--bg-card-hover) 50%,
-    var(--bg-card) 75%
+    var(--bg-card)       75%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: 4px;
+  animation: shimmer 1.4s infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* Accent pulse — used on high-priority KPI borders */
+@keyframes borderPulse {
+  0%, 100% { border-color: var(--border); }
+  50%       { border-color: var(--accent-bright); }
+}
+
+/* Fade in only */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Slide in from left — used for sidebar items */
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0);    }
 }

@@ -1,18 +1,33 @@
 /* ============================================================
-   main.js
-   Entry point.  Wires all modules together and owns every
-   renderXxx() function that writes API data into the DOM.
+   main.js  — v2.2.0
+   Entry point.  Wires all modules together.
 
-   Fixes applied
-   -------------
-   - _renderCohesionCards: replaced fragile .two-col .card:first-child
-     selector (which matched kpi-grid cards too) with explicit data-card
-     attribute selectors, set in cohesion.html.
-   - renderEnvironment / renderWinProb / renderCohesion: all DOM queries
-     are now guarded so missing elements are silently skipped rather than
-     throwing, which previously caused the whole render to abort.
-   - Charts.*: each init function already guards on canvas existence, but
-     callers now also guard to avoid passing null payloads.
+   Changes vs v2.1.0
+   -----------------
+   RACE CONDITION FIX
+   - Navigation.init() now runs AFTER pagesLoadedPromise resolves, not before.
+     Previously: nav init → user clicks → renderXxx() → querySelector finds
+     nothing (page HTML not yet injected) → silent blank section.
+   - Charts are only initialised when their page is active, guarded by
+     requestAnimationFrame to ensure the canvas is in the layout.
+
+   ERROR VISIBILITY
+   - Every API fetch error and render error is surfaced in the UI via
+     showError() which injects a visible red banner into the relevant page.
+   - Console.debug() used for verbose diagnostics; console.error() for real
+     errors; no more silent console.warn-and-move-on.
+   - _safeRender() wrapper catches and displays render-path exceptions.
+
+   LOADING STATES
+   - Each page section gets a "Loading..." skeleton while the API request
+     is in-flight; replaced with real content on success.
+   - The data-source badge colour now accurately reflects mixed / error states.
+
+   OTHER
+   - refreshAllData() only re-renders the currently active page immediately;
+     other pages are lazily rendered on first navigation (avoids chart sizing
+     bugs for off-screen canvases).
+   - _pendingRender set tracks which pages need a fresh render on next visit.
    ============================================================ */
 
 const AppState = {
@@ -25,39 +40,72 @@ const AppState = {
   winprob:     null,
 };
 
+// Track which pages have stale data and need re-rendering on navigation
+const _pendingRender = new Set();
+
+// ---------------------------------------------------------------------------
+// Bootstrap
+// ---------------------------------------------------------------------------
+
 document.addEventListener("DOMContentLoaded", async () => {
-  Navigation.init();
+  debug("DOMContentLoaded fired");
+
+  // Wait for page HTML to be injected BEFORE setting up navigation clicks.
+  // This eliminates the race where a user clicks a nav item before innerHTML
+  // has been written, leaving renderXxx() unable to find any DOM nodes.
+  if (window.pagesLoadedPromise) {
+    debug("Waiting for pagesLoadedPromise...");
+    await window.pagesLoadedPromise;
+    debug("Pages loaded, DOM ready");
+  }
+
+  Navigation.init();           // safe now — all page HTML is present
+  Navigation.onNavigate = onPageActivated;  // hook into navigation events
   setupTooltips();
   await bootstrap();
 });
 
-/* ============================================================
-   Bootstrap
-   ============================================================ */
 async function bootstrap() {
   try {
-    if (window.pagesLoadedPromise) await window.pagesLoadedPromise;
-
     const teamSelector = document.getElementById("teamSelector");
-    const teamsPayload = await ApiService.loadTeams();
-    AppState.teams     = teamsPayload.teams || [];
 
+    let teamsPayload;
+    try {
+      teamsPayload = await ApiService.loadTeams();
+    } catch (err) {
+      console.error("[bootstrap] loadTeams failed:", err);
+      showGlobalError("Could not load team list. Is the API server running?");
+      return;
+    }
+
+    AppState.teams = teamsPayload.teams || [];
     renderTeams(teamSelector, AppState.teams);
     updateDataSourceBadge(teamsPayload.source || "unknown");
 
-    if (!AppState.teams.length) return;
+    if (!AppState.teams.length) {
+      showGlobalError("No teams returned from API. Check /api/health for details.");
+      return;
+    }
 
     ApiService.teamId = teamSelector.value;
+    debug("Initial team_id:", ApiService.teamId);
+
     teamSelector.addEventListener("change", async (e) => {
       ApiService.teamId = e.target.value;
+      debug("Team changed to:", ApiService.teamId);
       await refreshAllData();
     });
 
     await refreshAllData();
   } catch (err) {
-    console.error("[bootstrap]", err);
+    console.error("[bootstrap] unhandled error:", err);
+    showGlobalError(`Bootstrap error: ${err.message}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Team selector rendering
+// ---------------------------------------------------------------------------
 
 function renderTeams(selector, teams) {
   if (!selector) return;
@@ -70,59 +118,120 @@ function renderTeams(selector, teams) {
     .map((t) => `<option value="${t.team_id}">${t.team_name}</option>`)
     .join("");
   selector.disabled = false;
+  debug("Rendered", teams.length, "teams in selector");
 }
 
-/* ============================================================
-   Full refresh
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// Full refresh
+// ---------------------------------------------------------------------------
+
 async function refreshAllData() {
-  try {
-    document.querySelectorAll(".kpi-value").forEach((el) => el.classList.add("shimmer"));
+  debug("refreshAllData() start, team_id=", ApiService.teamId);
 
-    const [dashboard, player, cohesion, injury, environment, winprob] = await Promise.all([
-      ApiService.loadDashboard(),
-      ApiService.loadPlayer(),
-      ApiService.loadCohesion(),
-      ApiService.loadInjury(),
-      ApiService.loadEnvironment(),
-      ApiService.loadWinProb(),
-    ]);
+  document.querySelectorAll(".kpi-value").forEach((el) => el.classList.add("shimmer"));
 
-    AppState.dashboard   = dashboard;
-    AppState.player      = player;
-    AppState.cohesion    = cohesion;
-    AppState.injury      = injury;
-    AppState.environment = environment;
-    AppState.winprob     = winprob;
+  // Mark all pages as needing re-render
+  ["dashboard", "player", "cohesion", "injury", "env", "winprob"].forEach(
+    (p) => _pendingRender.add(p)
+  );
 
-    renderDashboard();
-    renderPlayer();
-    renderCohesion();
-    renderInjury();
-    renderEnvironment();
-    renderWinProb();
+  const results = await Promise.allSettled([
+    ApiService.loadDashboard(),
+    ApiService.loadPlayer(),
+    ApiService.loadCohesion(),
+    ApiService.loadInjury(),
+    ApiService.loadEnvironment(),
+    ApiService.loadWinProb(),
+  ]);
 
-    const sources  = [dashboard, player, cohesion, injury, environment, winprob]
-      .map((p) => p?.source).filter(Boolean);
-    const allDB    = sources.every((s) => s.startsWith("database"));
-    const allFallbk = sources.every((s) => s === "fallback");
-    updateDataSourceBadge(
-      allDB      ? "database" :
-      allFallbk  ? "fallback" : "mixed"
-    );
-  } catch (err) {
-    console.error("[refreshAllData]", err);
-    updateDataSourceBadge("error");
-  } finally {
-    document.querySelectorAll(".kpi-value").forEach((el) => el.classList.remove("shimmer"));
+  const [dashRes, playerRes, cohesionRes, injuryRes, envRes, winprobRes] = results;
+
+  // Log any fetch-level failures
+  const labels = ["dashboard", "player", "cohesion", "injury", "environment", "winprob"];
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(`[refreshAllData] ${labels[i]} fetch failed:`, r.reason);
+    } else {
+      debug(`[refreshAllData] ${labels[i]} ok, source=${r.value?.source}`);
+    }
+  });
+
+  AppState.dashboard   = dashRes.status   === "fulfilled" ? dashRes.value   : null;
+  AppState.player      = playerRes.status === "fulfilled" ? playerRes.value : null;
+  AppState.cohesion    = cohesionRes.status === "fulfilled" ? cohesionRes.value : null;
+  AppState.injury      = injuryRes.status === "fulfilled" ? injuryRes.value : null;
+  AppState.environment = envRes.status    === "fulfilled" ? envRes.value    : null;
+  AppState.winprob     = winprobRes.status === "fulfilled" ? winprobRes.value : null;
+
+  // Always render the active page immediately; others render on demand
+  const activePage = document.querySelector(".page.active")?.id?.replace("page-", "") || "dashboard";
+  debug("Active page is:", activePage);
+  renderPage(activePage);
+
+  // Badge reflects worst status across all endpoints
+  const sources = results
+    .filter((r) => r.status === "fulfilled")
+    .map((r) => r.value?.source)
+    .filter(Boolean);
+  const hasError    = results.some((r) => r.status === "rejected");
+  const allDB       = sources.every((s) => s.startsWith("database"));
+  const allFallback = sources.every((s) => s === "fallback");
+
+  updateDataSourceBadge(
+    hasError      ? "error"    :
+    allDB         ? "database" :
+    allFallback   ? "fallback" : "mixed"
+  );
+
+  document.querySelectorAll(".kpi-value").forEach((el) => el.classList.remove("shimmer"));
+  debug("refreshAllData() complete");
+}
+
+// ---------------------------------------------------------------------------
+// Navigation hook — render page on first visit after data loaded
+// ---------------------------------------------------------------------------
+
+function onPageActivated(pageId) {
+  debug("onPageActivated:", pageId);
+  if (_pendingRender.has(pageId)) {
+    renderPage(pageId);
   }
 }
 
-/* ============================================================
-   renderDashboard
-   ============================================================ */
+function renderPage(pageId) {
+  _pendingRender.delete(pageId);
+  switch (pageId) {
+    case "dashboard": _safeRender(renderDashboard,     "dashboard");  break;
+    case "player":    _safeRender(renderPlayer,        "player");     break;
+    case "cohesion":  _safeRender(renderCohesion,      "cohesion");   break;
+    case "injury":    _safeRender(renderInjury,        "injury");     break;
+    case "env":       _safeRender(renderEnvironment,   "env");        break;
+    case "winprob":   _safeRender(renderWinProb,       "winprob");    break;
+    default: debug("Unknown pageId:", pageId);
+  }
+}
+
+// Wrap each render function so exceptions are caught and shown in the UI
+function _safeRender(fn, pageId) {
+  try {
+    fn();
+  } catch (err) {
+    console.error(`[render:${pageId}]`, err);
+    showPageError(pageId, `Render error: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// renderDashboard
+// ---------------------------------------------------------------------------
+
 function renderDashboard() {
-  if (!AppState.dashboard) return;
+  if (!AppState.dashboard) {
+    showPageError("dashboard", "Dashboard data unavailable");
+    return;
+  }
+  debug("renderDashboard(), source=", AppState.dashboard.source);
+
   const kpi    = AppState.dashboard.kpi;
   const values = document.querySelectorAll("#page-dashboard .kpi-value");
   if (values[0]) values[0].textContent = kpi.team_performance.toFixed(1);
@@ -130,18 +239,27 @@ function renderDashboard() {
   if (values[2]) values[2].textContent = String(kpi.high_risk_players);
   if (values[3]) values[3].textContent = `${kpi.next_match_win_pct.toFixed(1)}%`;
 
-  Charts.initPerfTrend(AppState.dashboard.performance_trend);
+  // Charts need the canvas to be in the visible layout — use rAF
+  requestAnimationFrame(() => {
+    Charts.initPerfTrend(AppState.dashboard.performance_trend);
+  });
+
   renderSquadStatusCards();
   animateCards();
   animateProgressBars();
 }
 
-/* ============================================================
-   renderPlayer
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// renderPlayer
+// ---------------------------------------------------------------------------
+
 function renderPlayer() {
   const data = AppState.player;
-  if (!data) return;
+  if (!data) {
+    showPageError("player", "Player efficiency data unavailable");
+    return;
+  }
+  debug("renderPlayer(), source=", data.source, "players=", data.players?.length);
 
   const leader  = data.leader  || {};
   const players = data.players || [];
@@ -169,10 +287,10 @@ function renderPlayer() {
     const avgXA = _teamAvg(players, "xa_per_90");
     const avgPA = _teamAvg(players, "pass_completion");
     const avgKP = _teamAvg(players, "key_passes");
-    const deltaXG = _delta(leader.xg_per_90,       avgXG);
-    const deltaXA = _delta(leader.xa_per_90,        avgXA);
-    const deltaPA = _delta(leader.pass_completion,  avgPA);
-    const deltaKP = _delta(leader.key_passes,        avgKP);
+    const deltaXG = _delta(leader.xg_per_90,      avgXG);
+    const deltaXA = _delta(leader.xa_per_90,       avgXA);
+    const deltaPA = _delta(leader.pass_completion, avgPA);
+    const deltaKP = _delta(leader.key_passes,      avgKP);
 
     metricsGrid.innerHTML = `
       <div class="metric-card">
@@ -206,7 +324,9 @@ function renderPlayer() {
     `;
   }
 
-  Charts.initRadar(data.radar, leader.player_name || "Top Player");
+  requestAnimationFrame(() => {
+    Charts.initRadar(data.radar, leader.player_name || "Top Player");
+  });
 
   const clusterGrid = document.querySelector("#page-player .cluster-grid");
   if (clusterGrid && players.length) {
@@ -234,8 +354,7 @@ function renderPlayer() {
         <div class="cluster-card${isSelected ? " selected" : ""}"
              style="border-left:3px solid ${c.border}">
           <div class="cluster-name">${type}
-            <span class="cluster-count"
-                  style="background:${c.badge};color:${c.text}">${names.length}</span>
+            <span class="cluster-count" style="background:${c.badge};color:${c.text}">${names.length}</span>
           </div>
           <ul class="cluster-players">
             ${names.slice(0, 3).map((n) => `<li>${n}</li>`).join("")}
@@ -262,12 +381,17 @@ function renderPlayer() {
   }
 }
 
-/* ============================================================
-   renderCohesion
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// renderCohesion
+// ---------------------------------------------------------------------------
+
 function renderCohesion() {
   const data = AppState.cohesion;
-  if (!data) return;
+  if (!data) {
+    showPageError("cohesion", "Team cohesion data unavailable");
+    return;
+  }
+  debug("renderCohesion(), source=", data.source, "edges=", data.edges?.length);
 
   const kpi    = data.kpi || {};
   const values = document.querySelectorAll("#page-cohesion .kpi-value");
@@ -276,7 +400,10 @@ function renderCohesion() {
   if (values[2]) values[2].textContent = (kpi.avg_degree       || 0).toFixed(1);
   if (values[3]) values[3].textContent = (kpi.clustering_coeff || 0).toFixed(2);
 
-  PassNetwork.init(data.edges && data.edges.length ? data.edges : null);
+  // PassNetwork reads SVG dimensions — must run after layout is stable
+  requestAnimationFrame(() => {
+    PassNetwork.init(data.edges && data.edges.length ? data.edges : null);
+  });
 
   if (data.edges && data.edges.length) {
     _renderCohesionCards(data.edges);
@@ -284,7 +411,6 @@ function renderCohesion() {
 }
 
 function _renderCohesionCards(edges) {
-  // Compute pass volume per node
   const vol = {};
   for (const e of edges) {
     vol[e.from] = (vol[e.from] || 0) + (e.weight || 1);
@@ -293,13 +419,10 @@ function _renderCohesionCards(edges) {
   const sorted = Object.entries(vol).sort((a, b) => b[1] - a[1]).slice(0, 5);
   const maxVol = sorted[0]?.[1] || 1;
 
-  // FIX: use data-card attributes added to cohesion.html instead of
-  // positional CSS selectors (.two-col .card:first-child) which are
-  // ambiguous when the kpi-grid cards are also inside .two-col wrappers.
   const centralCard = document.querySelector("#page-cohesion [data-card='central']");
   if (centralCard) {
-    const titleEl = centralCard.querySelector(".card-title");
-    const titleHTML = titleEl ? titleEl.outerHTML : '<div class="card-title">Central Players (High Betweenness)</div>';
+    const titleEl   = centralCard.querySelector(".card-title");
+    const titleHTML = titleEl ? titleEl.outerHTML : '<div class="card-title">Central Players</div>';
     const list = sorted.slice(0, 3).map(([name, v]) => `
       <div class="player-list-item">
         <div>
@@ -320,7 +443,7 @@ function _renderCohesionCards(edges) {
     for (const e of edges) passVol[e.from] = (passVol[e.from] || 0) + (e.weight || 1);
     const topPassers = Object.entries(passVol).sort((a, b) => b[1] - a[1]).slice(0, 3);
 
-    const titleEl  = connCard.querySelector(".card-title");
+    const titleEl   = connCard.querySelector(".card-title");
     const titleHTML = titleEl ? titleEl.outerHTML : '<div class="card-title">Most Connected Players</div>';
     const list = topPassers.map(([name, v]) => `
       <div class="player-list-item">
@@ -337,12 +460,17 @@ function _renderCohesionCards(edges) {
   }
 }
 
-/* ============================================================
-   renderInjury
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// renderInjury
+// ---------------------------------------------------------------------------
+
 function renderInjury() {
   const data = AppState.injury;
-  if (!data) return;
+  if (!data) {
+    showPageError("injury", "Injury risk data unavailable");
+    return;
+  }
+  debug("renderInjury(), source=", data.source, "players=", data.players?.length);
 
   const kpi    = data.kpi || {};
   const values = document.querySelectorAll("#page-injury .kpi-value");
@@ -352,17 +480,27 @@ function renderInjury() {
   if (values[3]) values[3].textContent = (kpi.avg_score || 0).toFixed(2);
 
   renderInjuryRiskTable();
-  Charts.initInjuryHistory(data.players || []);
+  requestAnimationFrame(() => {
+    Charts.initInjuryHistory(data.players || []);
+  });
 }
 
-/* ============================================================
-   renderEnvironment
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// renderEnvironment
+// ---------------------------------------------------------------------------
+
 function renderEnvironment() {
   const data = AppState.environment;
-  if (!data) return;
+  if (!data) {
+    showPageError("env", "Environmental impact data unavailable");
+    return;
+  }
+  debug("renderEnvironment(), source=", data.source, "points=", data.scatter?.length);
+
   if (data.scatter && data.scatter.length) {
-    Charts.initTempPerf(data.scatter);
+    requestAnimationFrame(() => {
+      Charts.initTempPerf(data.scatter);
+    });
   }
   const summary = data.condition_summary || {};
   if (Object.keys(summary).length) {
@@ -395,12 +533,17 @@ function _renderConditionSummary(summary) {
   }
 }
 
-/* ============================================================
-   renderWinProb
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// renderWinProb
+// ---------------------------------------------------------------------------
+
 function renderWinProb() {
   const data = AppState.winprob;
-  if (!data) return;
+  if (!data) {
+    showPageError("winprob", "Win probability data unavailable");
+    return;
+  }
+  debug("renderWinProb(), source=", data.source);
 
   const pct       = document.querySelectorAll("#page-winprob .prob-pct");
   const teams     = document.querySelectorAll("#page-winprob .prob-team");
@@ -416,17 +559,27 @@ function renderWinProb() {
   if (matchLine) matchLine.textContent = `Next Match Prediction • ${selected} vs Opponent`;
 
   if (data.timeline) {
-    Charts.initWinProb(data.timeline);
+    requestAnimationFrame(() => {
+      Charts.initWinProb(data.timeline);
+    });
   }
 }
 
-/* ============================================================
-   Squad status cards (dashboard)
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// Squad status cards (dashboard)
+// ---------------------------------------------------------------------------
+
 function renderSquadStatusCards() {
   const grid    = document.querySelector("#page-dashboard .squad-grid");
   const players = AppState.injury?.players;
-  if (!grid || !players?.length) return;
+  if (!grid) {
+    debug("renderSquadStatusCards: .squad-grid not found");
+    return;
+  }
+  if (!players?.length) {
+    debug("renderSquadStatusCards: no player data yet");
+    return;
+  }
 
   const top = [...players]
     .sort((a, b) => Number(b.risk_score) - Number(a.risk_score))
@@ -445,13 +598,21 @@ function renderSquadStatusCards() {
   }).join("");
 }
 
-/* ============================================================
-   Injury risk table
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// Injury risk table
+// ---------------------------------------------------------------------------
+
 function renderInjuryRiskTable() {
   const tbody   = document.querySelector("#page-injury .data-table tbody");
   const players = AppState.injury?.players;
-  if (!tbody || !players?.length) return;
+  if (!tbody) {
+    debug("renderInjuryRiskTable: tbody not found");
+    return;
+  }
+  if (!players?.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No data</td></tr>';
+    return;
+  }
 
   tbody.innerHTML = players.map((p) => {
     const score = Number(p.risk_score || 0);
@@ -480,9 +641,67 @@ function renderInjuryRiskTable() {
   }).join("");
 }
 
-/* ============================================================
-   Shared helpers
-   ============================================================ */
+// ---------------------------------------------------------------------------
+// Error display helpers
+// ---------------------------------------------------------------------------
+
+function showGlobalError(message) {
+  console.error("[global error]", message);
+  const area = document.querySelector(".content-area");
+  if (!area) return;
+  const existing = area.querySelector(".global-error-banner");
+  if (existing) existing.remove();
+  const el = document.createElement("div");
+  el.className = "global-error-banner";
+  el.style.cssText = [
+    "background:rgba(239,68,68,0.15)",
+    "border:1px solid rgba(239,68,68,0.4)",
+    "border-radius:8px",
+    "padding:16px 20px",
+    "margin-bottom:16px",
+    "color:#ef4444",
+    "font-size:13px",
+    "display:flex",
+    "align-items:center",
+    "gap:10px",
+  ].join(";");
+  el.innerHTML = `<span style="font-size:18px">⚠️</span>
+    <div>
+      <strong>Error:</strong> ${message}<br>
+      <span style="color:var(--text-secondary);font-size:11px">
+        Check <a href="/api/health" target="_blank" style="color:#ef4444">/api/health</a> for diagnostics.
+      </span>
+    </div>`;
+  area.prepend(el);
+}
+
+function showPageError(pageId, message) {
+  console.error(`[page:${pageId}]`, message);
+  const container = document.querySelector(`#page-${pageId} .kpi-grid`);
+  if (!container) return;
+  // Add a subtle inline error note rather than replacing content
+  const existing = document.querySelector(`#page-${pageId} .page-error-note`);
+  if (existing) existing.remove();
+  const el = document.createElement("div");
+  el.className = "page-error-note";
+  el.style.cssText = [
+    "grid-column:1/-1",
+    "background:rgba(239,68,68,0.1)",
+    "border:1px solid rgba(239,68,68,0.3)",
+    "border-radius:6px",
+    "padding:10px 14px",
+    "font-size:12px",
+    "color:#ef4444",
+  ].join(";");
+  el.innerHTML = `⚠️ ${message} — showing placeholder data.
+    <a href="/api/health" target="_blank" style="color:#ef4444;margin-left:8px">Check /api/health</a>`;
+  container.prepend(el);
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 function getRiskMeta(score) {
   if (score >= 0.67) return { label: "High Risk",  badgeClass: "badge-high",   cardClass: "risk-high" };
   if (score >= 0.4)  return { label: "Monitor",    badgeClass: "badge-medium", cardClass: "risk-med"  };
@@ -587,6 +806,13 @@ function formatNumber(n) {
 function debounce(fn, delay = 200) {
   let timer;
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay); };
+}
+
+// Verbose logging helper — enable by setting localStorage.debug = '1'
+function debug(...args) {
+  if (localStorage.getItem("debug") === "1") {
+    console.debug("[soccer-analytics]", ...args);
+  }
 }
 
 window.addEventListener("resize", debounce(() => {

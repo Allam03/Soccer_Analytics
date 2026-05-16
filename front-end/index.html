@@ -5,30 +5,34 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Soccer Analytics Platform</title>
 
-  <!-- Google Fonts -->
+  <!-- Fonts:
+       Syne        — geometric display font for headings and page titles
+       IBM Plex Mono — monospaced for KPI values, numbers, labels
+       DM Sans     — clean sans-serif for body text
+  -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
-    href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;700&family=DM+Sans:wght@300;400;500;600;700&display=swap"
     rel="stylesheet"
   />
 
-  <!-- CSS — الترتيب مهم: variables أول، بعدين reset، بعدين layout، بعدين components، بعدين pages -->
+  <!-- CSS load order matters: tokens → reset → layout → components → pages -->
   <link rel="stylesheet" href="/static/css/variables.css" />
   <link rel="stylesheet" href="/static/css/reset.css" />
   <link rel="stylesheet" href="/static/css/layout.css" />
   <link rel="stylesheet" href="/static/css/components.css" />
   <link rel="stylesheet" href="/static/css/pages.css" />
 
-  <!-- Chart.js من CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
 </head>
 <body>
 
 <div class="app">
 
-  <!-- ══════════════════════════════════════
-       SIDEBAR — التنقل الجانبي
-  ══════════════════════════════════════ -->
+  <!-- =========================================================
+       SIDEBAR
+  ========================================================= -->
   <aside class="sidebar">
 
     <div class="sidebar-logo">
@@ -40,52 +44,61 @@
     </div>
 
     <nav class="sidebar-nav">
+
+      <div class="nav-section-label">Analytics</div>
+
       <div class="nav-item active" data-page="dashboard">
-        <span class="nav-icon">📊</span> Dashboard
+        <span class="nav-icon">📊</span>
+        <span>Dashboard</span>
       </div>
       <div class="nav-item" data-page="player">
-        <span class="nav-icon">👤</span> Player Efficiency
+        <span class="nav-icon">👤</span>
+        <span>Player Efficiency</span>
       </div>
       <div class="nav-item" data-page="cohesion">
-        <span class="nav-icon">🕸️</span> Team Cohesion
+        <span class="nav-icon">🕸️</span>
+        <span>Team Cohesion</span>
       </div>
       <div class="nav-item" data-page="injury">
-        <span class="nav-icon">🏥</span> Injury Risk
+        <span class="nav-icon">🏥</span>
+        <span>Injury Risk</span>
       </div>
       <div class="nav-item" data-page="env">
-        <span class="nav-icon">🌡️</span> Environment Impact
+        <span class="nav-icon">🌡️</span>
+        <span>Environment Impact</span>
       </div>
       <div class="nav-item" data-page="winprob">
-        <span class="nav-icon">🎯</span> Win Probability
+        <span class="nav-icon">🎯</span>
+        <span>Win Probability</span>
       </div>
+
+      <div class="nav-item nav-debug" data-page="debug">
+        <span class="nav-icon">🔧</span>
+        <span>Debug</span>
+      </div>
+
     </nav>
 
     <div class="sidebar-footer">
       <div class="data-sources-label">Data Sources</div>
       <div class="data-source"><div class="ds-dot"></div><span>StatsBomb</span></div>
       <div class="data-source"><div class="ds-dot"></div><span>Transfermarkt</span></div>
-      <div class="data-source"><div class="ds-dot"></div><span>Weather API</span></div>
+      <div class="data-source"><div class="ds-dot"></div><span>Open-Meteo</span></div>
     </div>
 
-  </aside><!-- /sidebar -->
+  </aside>
 
-  <!-- ══════════════════════════════════════
-       MAIN WRAPPER — topbar + content
-  ══════════════════════════════════════ -->
+  <!-- =========================================================
+       MAIN: topbar + content
+  ========================================================= -->
   <div class="main-wrapper">
 
-    <!-- TOP BAR -->
     <div class="topbar">
       <div class="topbar-left">
         <span class="page-title" id="pageTitle">Analytics Dashboard</span>
       </div>
       <div class="topbar-right">
-        <span class="top-select" id="dataSourceBadge">Data: Loading</span>
-        <select class="top-select">
-          <option>Premier League 2025/26</option>
-          <option>La Liga 2025/26</option>
-          <option>Bundesliga 2025/26</option>
-        </select>
+        <span class="source-badge" id="dataSourceBadge">Data: Loading</span>
         <select class="top-select" id="teamSelector">
           <option>Manchester City</option>
           <option>Arsenal</option>
@@ -105,63 +118,60 @@
           </div>
         </div>
       </div>
-    </div><!-- /topbar -->
+    </div>
 
-    <!-- CONTENT AREA — كل الصفحات جوه هنا -->
     <main class="content-area">
 
-      <!-- صفحة 1: Dashboard -->
       <div class="page active" id="page-dashboard">
-        <!-- المحتوى في pages/dashboard.html — هنا include بالـ JS -->
         <div id="dashboard-content"></div>
       </div>
 
-      <!-- صفحة 2: Player Efficiency -->
       <div class="page" id="page-player">
         <div id="player-content"></div>
       </div>
 
-      <!-- صفحة 3: Team Cohesion -->
       <div class="page" id="page-cohesion">
         <div id="cohesion-content"></div>
       </div>
 
-      <!-- صفحة 4: Injury Risk -->
       <div class="page" id="page-injury">
         <div id="injury-content"></div>
       </div>
 
-      <!-- صفحة 5: Environmental -->
       <div class="page" id="page-env">
         <div id="env-content"></div>
       </div>
 
-      <!-- صفحة 6: Win Probability -->
       <div class="page" id="page-winprob">
         <div id="winprob-content"></div>
       </div>
 
-    </main><!-- /content-area -->
+      <div class="page" id="page-debug">
+        <div id="debug-content"></div>
+      </div>
 
-  </div><!-- /main-wrapper -->
-</div><!-- /app -->
+    </main>
 
-<!-- Tooltip global -->
+  </div>
+</div>
+
 <div class="tooltip" id="tooltip"></div>
 
-<!-- JS — بالترتيب المهم:
-     1. charts.js (يعرّف Charts object)
-     2. passNetwork.js (يعرّف PassNetwork object)
-     3. navigation.js (يعرّف Navigation object)
-     4. main.js (بيستخدم كل الـ objects السابقة)
+<!--
+  Script load order:
+  1. charts.js      — Chart.js wrappers, defines Charts object
+  2. passNetwork.js — SVG force graph, defines PassNetwork object
+  3. navigation.js  — page switching, defines Navigation object
+  4. api.js         — fetch wrappers, defines ApiService object
+  5. main.js        — bootstraps everything, uses all objects above
+  6. pageLoader.js  — async HTML injection; sets window.pagesLoadedPromise
+                      main.js awaits this before rendering anything
 -->
 <script src="/static/js/charts.js"></script>
 <script src="/static/js/passNetwork.js"></script>
 <script src="/static/js/navigation.js"></script>
 <script src="/static/js/api.js"></script>
 <script src="/static/js/main.js"></script>
-
-<!-- Inline loader — بيحمّل HTML الصفحات ويحطها في الـ content divs -->
 <script src="/static/js/pageLoader.js"></script>
 
 </body>
