@@ -1,60 +1,30 @@
 <!-- pages/player.html -->
-
 <div class="two-col" style="align-items:start">
 
-  <!-- ── العمود الشمال: بروفايل + ارقام + clusters ── -->
   <div>
     <div class="card mb-16">
       <div class="player-profile">
-        <div class="player-avatar">KDB</div>
+        <div class="player-avatar">--</div>
         <div class="player-info">
-          <div class="player-name">Kevin De Bruyne</div>
-          <div class="player-meta">Midfielder • #17 • Manchester City</div>
-          <div class="player-stats-row">
-            <div class="stat-item">Player Type <span>Creator</span></div>
-            <div class="stat-item">Efficiency <span>8.7/10</span></div>
-            <div class="stat-item">Matches <span>38</span></div>
-            <div class="stat-item">Minutes <span>2,847</span></div>
-          </div>
+          <div class="player-name">Loading...</div>
+          <div class="player-meta">— • —</div>
+          <div class="player-stats-row"></div>
         </div>
       </div>
     </div>
 
-    <!-- 6 metric cards -->
     <div class="metrics-grid" style="grid-template-columns:repeat(3,1fr)">
-      <div class="metric-card"><div class="metric-val text-accent">0.42</div><div class="metric-label">xG per 90</div><div class="metric-delta pos">+12% vs avg</div></div>
-      <div class="metric-card"><div class="metric-val text-cyan">0.68</div><div class="metric-label">xA per 90</div><div class="metric-delta pos">+8% vs avg</div></div>
-      <div class="metric-card"><div class="metric-val">89.3%</div><div class="metric-label">Pass Completion</div><div class="metric-delta pos">+3% vs avg</div></div>
-      <div class="metric-card"><div class="metric-val text-amber">3.8</div><div class="metric-label">Key Passes</div><div class="metric-delta pos">+15% vs avg</div></div>
-      <div class="metric-card"><div class="metric-val">58%</div><div class="metric-label">Duels Won</div><div class="metric-delta neg">-2% vs avg</div></div>
-      <div class="metric-card"><div class="metric-val">10.4</div><div class="metric-label">Distance (km)</div><div class="metric-delta pos">+5% vs avg</div></div>
+      <!-- Populated by renderPlayer() -->
     </div>
 
-    <!-- Player Style Clusters -->
     <div class="card mt-16">
       <div class="card-title">Player Style Clusters</div>
       <div class="cluster-grid" style="grid-template-columns:repeat(2,1fr)">
-        <div class="cluster-card selected">
-          <div class="cluster-name">Creators <span class="cluster-count">8</span></div>
-          <ul class="cluster-players"><li>De Bruyne</li><li>Bernardo</li><li>Foden</li></ul>
-        </div>
-        <div class="cluster-card" style="border-left:3px solid var(--red)">
-          <div class="cluster-name">Finishers <span class="cluster-count" style="background:var(--red-dim);color:var(--red)">4</span></div>
-          <ul class="cluster-players"><li>Haaland</li><li>Alvarez</li></ul>
-        </div>
-        <div class="cluster-card">
-          <div class="cluster-name">Ball Winners <span class="cluster-count">6</span></div>
-          <ul class="cluster-players"><li>Rodri</li><li>Kovacic</li></ul>
-        </div>
-        <div class="cluster-card" style="border-left:3px solid var(--cyan)">
-          <div class="cluster-name">Box-to-Box <span class="cluster-count" style="background:rgba(34,211,238,0.1);color:var(--cyan)">5</span></div>
-          <ul class="cluster-players"><li>Grealish</li><li>Doku</li></ul>
-        </div>
+        <!-- Populated by renderPlayer() -->
       </div>
     </div>
   </div>
 
-  <!-- ── العمود اليمين: Radar chart ── -->
   <div class="card">
     <div class="card-title">Performance Radar Chart</div>
     <div class="chart-wrap" style="height:340px">
@@ -62,4 +32,25 @@
     </div>
   </div>
 
+</div>
+
+<div class="card mt-16">
+  <div class="card-title">Player Stats Table</div>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Player</th>
+        <th>Position</th>
+        <th>Type</th>
+        <th>Matches</th>
+        <th>xG/90</th>
+        <th>xA/90</th>
+        <th>Pass %</th>
+        <th>Key Passes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- Populated by renderPlayer() -->
+    </tbody>
+  </table>
 </div>

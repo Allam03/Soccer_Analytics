@@ -1,33 +1,28 @@
 <!-- pages/dashboard.html -->
-<!-- محتوى صفحة الـ Dashboard — بيتحمّل داخل #dashboard-content -->
-
-<!-- ── KPI Cards ── -->
 <div class="kpi-grid">
-  <div class="kpi-card" data-tip="متوسط أداء الفريق في آخر 10 مباريات">
+  <div class="kpi-card" data-tip="Average team performance over the last 10 matches">
     <div class="kpi-label">Team Performance</div>
-    <div class="kpi-value">87.5</div>
-    <div class="kpi-sub up">↑ 5.2% vs last match</div>
+    <div class="kpi-value shimmer" style="height:36px;width:60px">&nbsp;</div>
+    <div class="kpi-sub">vs last match</div>
   </div>
-  <div class="kpi-card" data-tip="مؤشر تماسك الفريق في التمريرات والتحركات">
+  <div class="kpi-card" data-tip="Team cohesion index based on pass network">
     <div class="kpi-label">Cohesion Index</div>
-    <div class="kpi-value text-accent">0.82</div>
-    <div class="kpi-sub up">↑ Excellent</div>
+    <div class="kpi-value shimmer" style="height:36px;width:60px">&nbsp;</div>
+    <div class="kpi-sub up">Pass network quality</div>
   </div>
-  <div class="kpi-card" data-tip="عدد اللاعبين اللي خطر إصابتهم عالي">
+  <div class="kpi-card" data-tip="Players flagged as high injury risk">
     <div class="kpi-label">High Risk Players</div>
-    <div class="kpi-value text-red">3</div>
-    <div class="kpi-sub warn">⚠ Requires attention</div>
+    <div class="kpi-value shimmer" style="height:36px;width:40px">&nbsp;</div>
+    <div class="kpi-sub warn">Requires attention</div>
   </div>
-  <div class="kpi-card" data-tip="احتمالية الفوز في المباراة القادمة">
+  <div class="kpi-card" data-tip="Predicted win probability for the next match">
     <div class="kpi-label">Next Match Win %</div>
-    <div class="kpi-value text-accent">68%</div>
-    <div class="kpi-sub">vs Arsenal (H)</div>
+    <div class="kpi-value shimmer" style="height:36px;width:60px">&nbsp;</div>
+    <div class="kpi-sub">Model prediction</div>
   </div>
 </div>
 
-<!-- ── Performance Trend + Fixtures ── -->
 <div class="col-7-3">
-
   <div class="card">
     <div class="card-title">Performance Trend (Last 10 Matches)</div>
     <div class="chart-wrap" style="height:200px">
@@ -36,64 +31,16 @@
   </div>
 
   <div class="card">
-    <div class="card-title">Upcoming Fixtures & Predictions</div>
-
-    <div class="fixture-item">
-      <div class="fixture-venue venue-h">H</div>
-      <div style="flex:1">
-        <div class="fixture-opp">vs Arsenal</div>
-        <div class="fixture-date">Apr 20</div>
-        <div class="progress-bar fixture-bar mt-8"><div class="progress-fill green" style="width:68%"></div></div>
-      </div>
-      <div class="fixture-prob">68%</div>
+    <div class="card-title">Upcoming Fixtures &amp; Predictions</div>
+    <div class="text-muted fs-12" style="padding:20px 0;text-align:center">
+      No upcoming fixtures loaded
     </div>
-
-    <div class="fixture-item">
-      <div class="fixture-venue venue-a">A</div>
-      <div style="flex:1">
-        <div class="fixture-opp">vs Liverpool</div>
-        <div class="fixture-date">Apr 27</div>
-        <div class="progress-bar fixture-bar mt-8"><div class="progress-fill green" style="width:45%"></div></div>
-      </div>
-      <div class="fixture-prob">45%</div>
-    </div>
-
-    <div class="fixture-item">
-      <div class="fixture-venue venue-h">H</div>
-      <div style="flex:1">
-        <div class="fixture-opp">vs Chelsea</div>
-        <div class="fixture-date">May 4</div>
-        <div class="progress-bar fixture-bar mt-8"><div class="progress-fill green" style="width:72%"></div></div>
-      </div>
-      <div class="fixture-prob">72%</div>
-    </div>
-
-    <div class="fixture-item">
-      <div class="fixture-venue venue-a">A</div>
-      <div style="flex:1">
-        <div class="fixture-opp">vs Tottenham</div>
-        <div class="fixture-date">May 11</div>
-        <div class="progress-bar fixture-bar mt-8"><div class="progress-fill green" style="width:58%"></div></div>
-      </div>
-      <div class="fixture-prob">58%</div>
-    </div>
-
   </div>
 </div>
 
-<!-- ── Squad Status ── -->
 <div class="mt-16">
-  <div class="section-header">Squad Status & Injury Risk</div>
+  <div class="section-header">Squad Status &amp; Injury Risk</div>
   <div class="squad-grid">
-    <div class="squad-card risk-ok"><div class="squad-name">De Bruyne</div><div class="squad-pos">MF</div><span class="badge badge-low">Available</span></div>
-    <div class="squad-card risk-ok"><div class="squad-name">Haaland</div><div class="squad-pos">FW</div><span class="badge badge-low">Available</span></div>
-    <div class="squad-card risk-med"><div class="squad-name">Rodri</div><div class="squad-pos">MF</div><span class="badge badge-medium">Monitor</span></div>
-    <div class="squad-card risk-high"><div class="squad-name">Walker</div><div class="squad-pos">DF</div><span class="badge badge-high">High Risk</span></div>
-    <div class="squad-card risk-ok"><div class="squad-name">Grealish</div><div class="squad-pos">MF</div><span class="badge badge-low">Available</span></div>
-    <div class="squad-card risk-med"><div class="squad-name">Stones</div><div class="squad-pos">DF</div><span class="badge badge-medium">Monitor</span></div>
-    <div class="squad-card risk-ok"><div class="squad-name">Foden</div><div class="squad-pos">MF</div><span class="badge badge-low">Available</span></div>
-    <div class="squad-card risk-high"><div class="squad-name">Dias</div><div class="squad-pos">DF</div><span class="badge badge-high">High Risk</span></div>
-    <div class="squad-card risk-ok"><div class="squad-name">Bernardo</div><div class="squad-pos">MF</div><span class="badge badge-low">Available</span></div>
-    <div class="squad-card risk-ok"><div class="squad-name">Ederson</div><div class="squad-pos">GK</div><span class="badge badge-low">Available</span></div>
+    <!-- Populated by renderSquadStatusCards() -->
   </div>
 </div>

@@ -1,9 +1,25 @@
 <!-- pages/injury.html -->
 <div class="kpi-grid">
-  <div class="kpi-card"><div class="kpi-label">High Risk</div><div class="kpi-value text-red">3</div><div class="kpi-sub danger">Players flagged</div></div>
-  <div class="kpi-card"><div class="kpi-label">Medium Risk</div><div class="kpi-value text-amber">5</div><div class="kpi-sub warn">Under monitoring</div></div>
-  <div class="kpi-card"><div class="kpi-label">Low Risk</div><div class="kpi-value text-accent">17</div><div class="kpi-sub up">Available</div></div>
-  <div class="kpi-card"><div class="kpi-label">Avg Risk Score</div><div class="kpi-value text-cyan">0.28</div><div class="kpi-sub">Squad average</div></div>
+  <div class="kpi-card kpi-danger">
+    <div class="kpi-label">High Risk</div>
+    <div class="kpi-value text-red shimmer" style="height:36px;width:40px">&nbsp;</div>
+    <div class="kpi-sub danger">Players flagged</div>
+  </div>
+  <div class="kpi-card kpi-warn">
+    <div class="kpi-label">Medium Risk</div>
+    <div class="kpi-value text-amber shimmer" style="height:36px;width:40px">&nbsp;</div>
+    <div class="kpi-sub warn">Under monitoring</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Low Risk</div>
+    <div class="kpi-value text-accent shimmer" style="height:36px;width:40px">&nbsp;</div>
+    <div class="kpi-sub up">Available</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Avg Risk Score</div>
+    <div class="kpi-value text-cyan shimmer" style="height:36px;width:60px">&nbsp;</div>
+    <div class="kpi-sub">Squad average</div>
+  </div>
 </div>
 
 <div class="card mb-16">
@@ -11,60 +27,17 @@
   <table class="data-table">
     <thead>
       <tr>
-        <th>Player</th><th>Position</th><th>Risk Score</th>
-        <th>Risk Level</th><th>Workload (7d)</th>
-        <th>Last Injury</th><th>Recommendation</th>
+        <th>Player</th>
+        <th>Position</th>
+        <th>Risk Score</th>
+        <th>Risk Level</th>
+        <th>Workload (30d)</th>
+        <th>Last Injury</th>
+        <th>Recommendation</th>
       </tr>
     </thead>
     <tbody>
-      <tr>
-        <td class="fw-700">Kyle Walker</td><td>RB</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:78%;background:var(--red)"></div></div><span class="fs-12" style="width:30px">0.78</span></div></td>
-        <td><span class="badge badge-high">High</span></td>
-        <td>540 min</td><td>45 days ago</td><td class="text-muted fs-12">Rest advised</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Ruben Dias</td><td>CB</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:72%;background:var(--red)"></div></div><span class="fs-12" style="width:30px">0.72</span></div></td>
-        <td><span class="badge badge-high">High</span></td>
-        <td>630 min</td><td>12 days ago</td><td class="text-muted fs-12">Rotation needed</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Jack Grealish</td><td>LW</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:68%;background:var(--red)"></div></div><span class="fs-12" style="width:30px">0.68</span></div></td>
-        <td><span class="badge badge-high">High</span></td>
-        <td>480 min</td><td>89 days ago</td><td class="text-muted fs-12">Monitor closely</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Rodri</td><td>CDM</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:54%;background:var(--amber)"></div></div><span class="fs-12" style="width:30px">0.54</span></div></td>
-        <td><span class="badge badge-medium">Medium</span></td>
-        <td>720 min</td><td>120 days ago</td><td class="text-muted fs-12">Reduce minutes</td>
-      </tr>
-      <tr>
-        <td class="fw-700">John Stones</td><td>CB</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:48%;background:var(--amber)"></div></div><span class="fs-12" style="width:30px">0.48</span></div></td>
-        <td><span class="badge badge-medium">Medium</span></td>
-        <td>450 min</td><td>67 days ago</td><td class="text-muted fs-12">Standard monitoring</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Kevin De Bruyne</td><td>CAM</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:32%;background:var(--accent)"></div></div><span class="fs-12" style="width:30px">0.32</span></div></td>
-        <td><span class="badge badge-low">Low</span></td>
-        <td>540 min</td><td>210 days ago</td><td class="text-muted fs-12">Proceed normally</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Erling Haaland</td><td>ST</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:28%;background:var(--accent)"></div></div><span class="fs-12" style="width:30px">0.28</span></div></td>
-        <td><span class="badge badge-low">Low</span></td>
-        <td>600 min</td><td>Never</td><td class="text-muted fs-12">Proceed normally</td>
-      </tr>
-      <tr>
-        <td class="fw-700">Phil Foden</td><td>RW</td>
-        <td><div class="risk-score-bar"><div class="risk-bar"><div class="risk-bar-fill" style="width:25%;background:var(--accent)"></div></div><span class="fs-12" style="width:30px">0.25</span></div></td>
-        <td><span class="badge badge-low">Low</span></td>
-        <td>510 min</td><td>180 days ago</td><td class="text-muted fs-12">Proceed normally</td>
-      </tr>
+      <!-- Populated by renderInjuryRiskTable() -->
     </tbody>
   </table>
 </div>
@@ -72,15 +45,35 @@
 <div class="two-col">
   <div class="card">
     <div class="card-title">Top Risk Factors (SHAP Analysis)</div>
-    <div class="factors-item"><div class="factor-name">Rolling 7-day workload</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:84%"></div></div></div><div class="factor-val">0.42</div></div>
-    <div class="factors-item"><div class="factor-name">Days since last injury</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill blue" style="width:76%"></div></div></div><div class="factor-val">0.38</div></div>
-    <div class="factors-item"><div class="factor-name">Match congestion</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:62%"></div></div></div><div class="factor-val">0.31</div></div>
-    <div class="factors-item"><div class="factor-name">Age factor</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill amber" style="width:48%"></div></div></div><div class="factor-val">0.24</div></div>
-    <div class="factors-item"><div class="factor-name">Training intensity</div><div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:38%"></div></div></div><div class="factor-val">0.19</div></div>
+    <div class="factors-item">
+      <div class="factor-name">Rolling 30-day workload</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:84%"></div></div></div>
+      <div class="factor-val">0.42</div>
+    </div>
+    <div class="factors-item">
+      <div class="factor-name">Days since last injury</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill blue" style="width:76%"></div></div></div>
+      <div class="factor-val">0.38</div>
+    </div>
+    <div class="factors-item">
+      <div class="factor-name">Match congestion</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:62%"></div></div></div>
+      <div class="factor-val">0.31</div>
+    </div>
+    <div class="factors-item">
+      <div class="factor-name">Age factor</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill amber" style="width:48%"></div></div></div>
+      <div class="factor-val">0.24</div>
+    </div>
+    <div class="factors-item">
+      <div class="factor-name">Training intensity</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill red" style="width:38%"></div></div></div>
+      <div class="factor-val">0.19</div>
+    </div>
   </div>
   <div class="card">
-    <div class="card-title">Injury History Trends</div>
+    <div class="card-title">Injury Risk Distribution</div>
     <div class="chart-wrap" style="height:200px"><canvas id="injuryHistChart"></canvas></div>
-    <p class="text-muted fs-11 mt-8 text-center">Monthly injury count (last 12 months)</p>
+    <p class="text-muted fs-11 mt-8 text-center">Risk score distribution across squad</p>
   </div>
 </div>
