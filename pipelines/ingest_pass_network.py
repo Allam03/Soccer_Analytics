@@ -1,14 +1,14 @@
 """
 pipelines/ingest_pass_network.py
 
-Pass network edges are now extracted inside ingest_statsbomb.py during the
-same event-loading pass (fix #7), so running the full pipeline via main.py
-no longer needs this file.
+Pass network edges are extracted inside ingest_statsbomb.py during the
+same event-loading pass, so running the full pipeline via main.py no
+longer needs this file.
 
 This stub exists as a recovery / backfill tool: if you need to (re)populate
-pass_network_edges for matches that were ingested before fix #7, run this
-script directly.  It reads each event file exactly once and writes edges
-for any match that currently has no edge rows.
+pass_network_edges for matches ingested before that fix, run this script
+directly.  It reads each event file exactly once and writes edges for any
+match that currently has no edge rows.
 """
 
 import logging
@@ -89,9 +89,10 @@ def run(conn=None):
     team_cache   = TeamCache(conn)
     player_cache = PlayerCache(conn)
 
+    # FIX: was m.statsbomb_match_id — column is named sb_match_id in the schema.
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT m.match_id, m.statsbomb_match_id
+            SELECT m.match_id, m.sb_match_id
             FROM   matches m
             WHERE  NOT EXISTS (
                 SELECT 1 FROM pass_network_edges e

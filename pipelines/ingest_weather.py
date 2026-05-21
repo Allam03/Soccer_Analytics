@@ -2,11 +2,14 @@
 pipelines/ingest_weather.py
 
 Fetch historical weather from Open-Meteo and backfill weather_id into
-player_match_stats.  Coordinates are now stored in the stadiums table
+player_match_stats.  Coordinates are stored in the stadiums table
 (not on matches directly), so this module reads from and writes to stadiums.
 
 Changes vs original
 -------------------
+- upsert_weather no longer commits internally (fixed in load/postgres.py);
+  this module now commits once per successful fetch, which is equivalent
+  to the old behaviour but is explicit about who owns the transaction.
 - Stadium coordinates read from stadiums JOIN matches (not matches.stadium_lat/lng).
 - _backfill_stadium_coords() writes to stadiums.stadium_lat / stadium_lng.
 - weather_id backfill path unchanged (player_match_stats.weather_id).
@@ -251,7 +254,6 @@ def _backfill_stadium_coords(conn, coord_map: dict[int, tuple[float, float]]):
     if not coord_map:
         return
 
-    # Build {stadium_id -> (lat, lng)} by looking up via match_id
     with conn.cursor() as cur:
         match_ids = list(coord_map.keys())
         cur.execute("""
@@ -312,7 +314,7 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
     logger.info("Weather ingestion: %d matches need data", len(pending_rows))
 
     work_items:  list  = []
-    coord_map:   dict  = {}   # match_id -> (lat, lng) for stadium backfill
+    coord_map:   dict  = {}
     skipped      = 0
     unresolved: set[str] = set()
 
@@ -336,7 +338,6 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
         len(work_items), skipped,
     )
 
-    # Backfill resolved coords into stadiums table
     _backfill_stadium_coords(conn, coord_map)
 
     if not work_items:
@@ -359,7 +360,10 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
             if weather is None:
                 failed += 1
                 continue
+            # upsert_weather no longer commits; we commit here after each row
+            # so a failure mid-run doesn't lose all preceding successful fetches.
             upsert_weather(conn, match_id, weather)
+            conn.commit()
             inserted += 1
             if inserted % 100 == 0:
                 logger.info("  Weather progress: %d / %d", inserted, len(work_items))

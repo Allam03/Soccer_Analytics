@@ -61,7 +61,12 @@ def upsert_match(conn, row: dict) -> int:
 
 
 def upsert_weather(conn, match_id: int, weather: dict) -> int:
-    """Insert or update a weather row. Commits immediately. Returns weather_id."""
+    """Insert or update a weather row. Returns weather_id. Does not commit.
+
+    The caller is responsible for committing.  This keeps upsert_weather
+    consistent with every other write helper in this module and allows the
+    caller to include weather writes in a larger atomic batch.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO weather (
@@ -83,9 +88,7 @@ def upsert_weather(conn, match_id: int, weather: dict) -> int:
             weather.get("precipitation_mm"),
             weather.get("weather_condition"),
         ))
-        weather_id = cur.fetchone()[0]
-    conn.commit()
-    return weather_id
+        return cur.fetchone()[0]
 
 
 def insert_stats(conn, rows: list, page_size: int = 500):
@@ -112,7 +115,7 @@ def insert_stats(conn, rows: list, page_size: int = 500):
                 tackles, interceptions, clearances, pressures,
                 yellow_cards, red_cards,
                 minutes_played, sub_minute, starting_position
-                
+
             ) VALUES %s
             ON CONFLICT (player_id, match_id) DO UPDATE SET
                 goals               = EXCLUDED.goals,
