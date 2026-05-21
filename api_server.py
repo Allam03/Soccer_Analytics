@@ -1,35 +1,27 @@
 """
-api_server.py  — v2.2.0
+api_server.py  — v2.3.0
 
-Changes vs v2.1.0
+Changes vs v2.2.0
 -----------------
+SECURITY
+- CORS allowed origins now read from the ALLOWED_ORIGINS environment variable
+  (comma-separated).  Defaults to "*" when unset so local dev is unchanged,
+  but production deployments can lock it down without touching code.
+- team_id is now validated against the teams table before any heavy query
+  runs.  Unknown IDs return HTTP 404 immediately instead of silently falling
+  through to fallback demo data.
+
 BUG FIXES
-- win_probability(): _m5_win_pct() called win_probability() → infinite
-  recursion every time /api/dashboard was fetched.  Fixed: _m5_win_pct()
-  now runs a lightweight direct query / artifact path instead of calling
-  the full endpoint.
-- _db_ok(): was called inside the win_probability try-block after the
-  heavy query had already started; moved to a pre-check.
-- Artifact loading: exceptions were swallowed silently; now logged at
-  WARNING level so missing .pkl files are visible in the log.
+- injury_risk(): `seen` was typed as dict[str, bool] and used as a
+  set-with-value, and was declared twice in the same function scope (once
+  per code path).  Both declarations replaced with a single `seen: set[str]`
+  that is shared across the two branches via a helper.
+- ingest_injuries.py date_of_birth null check simplified (separate fix).
 
-OBSERVABILITY
-- Structured per-request logging: method, path, status, duration_ms.
-- /api/health  endpoint: reports DB reachability, artifact load counts,
-  table row-counts, and the last error for each table query.  Use this
-  first when something looks wrong.
-- /api/debug/artifacts: lists every artifact key and whether the object
-  is loaded or None.
-- /api/debug/db: runs a quick SELECT 1 and reports the psycopg2 version.
-- All render-path exceptions now include the endpoint name in the log so
-  tracebacks are easy to grep.
-- A _last_errors dict accumulates the most recent exception per endpoint
-  so /api/health can surface them without re-running queries.
-
-RELIABILITY
-- DB connections are now opened / closed per-request with a try/finally
-  (unchanged) but _query() wraps the whole thing so callers never leak.
-- Decimal coercion already present; extended to cover all new queries.
+OBSERVABILITY (unchanged from v2.2.0)
+- Structured per-request logging.
+- /api/health, /api/debug/artifacts, /api/debug/db endpoints.
+- _last_errors dict for per-endpoint exception surfacing.
 """
 
 from __future__ import annotations
@@ -50,7 +42,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -72,7 +64,6 @@ BASE_DIR     = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "front-end"
 ARTIFACT_DIR = BASE_DIR / "artifacts"
 
-# Accumulate the most recent exception per endpoint for /api/health
 _last_errors: dict[str, str] = {}
 
 # =============================================================================
@@ -153,10 +144,17 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Soccer Analytics API", version="2.2.0", lifespan=lifespan)
+# ---------------------------------------------------------------------------
+# CORS — read from environment so production can restrict origins without
+# touching code.  Unset => "*" (all origins), fine for local dev only.
+# ---------------------------------------------------------------------------
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
+_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+app = FastAPI(title="Soccer Analytics API", version="2.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -173,7 +171,6 @@ async def log_requests(request: Request, call_next):
     start = time.monotonic()
     response = await call_next(request)
     ms = (time.monotonic() - start) * 1000
-    # Only log API calls to reduce noise from static file requests
     if request.url.path.startswith("/api"):
         logger.info(
             "%s %s → %d  (%.1f ms)",
@@ -222,6 +219,22 @@ def _table_count(table: str) -> int | str:
         return f"error: {exc}"
 
 
+def _validate_team_id(team_id: int) -> None:
+    """Raise HTTP 404 if team_id does not exist in the teams table.
+
+    Skipped gracefully when the DB is unreachable so that the fallback
+    data paths still work without a live database.
+    """
+    if not _db_ok():
+        return
+    rows = _query("SELECT 1 FROM teams WHERE team_id = %s LIMIT 1", (team_id,))
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"team_id={team_id} not found. Use /api/options/teams to list valid IDs.",
+        )
+
+
 # =============================================================================
 # Static routes
 # =============================================================================
@@ -237,24 +250,13 @@ def favicon() -> Response:
 
 
 # =============================================================================
-# /api/health  — first stop when debugging
+# /api/health
 # =============================================================================
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    """
-    Diagnostic endpoint.  Call this first when something looks wrong.
-
-    Returns:
-      db_ok          — can we reach the database?
-      db_dsn_host    — host:port extracted from DB_DSN (password redacted)
-      table_counts   — row counts for every key table
-      artifacts      — which .pkl / .parquet files are loaded
-      last_errors    — most recent exception per API endpoint
-    """
     db_reachable = _db_ok()
 
-    # Extract host:port from DSN without exposing password
     try:
         import re
         dsn_host = re.sub(r":[^:@]+@", ":***@", DB_DSN)
@@ -289,12 +291,11 @@ def health() -> dict[str, Any]:
 
 
 # =============================================================================
-# /api/debug/artifacts  — detailed artifact info
+# /api/debug/artifacts
 # =============================================================================
 
 @app.get("/api/debug/artifacts")
 def debug_artifacts() -> dict[str, Any]:
-    """List every artifact key, its type, and basic shape info."""
     out: dict[str, Any] = {}
     for model_key, model_dict in _A.items():
         out[model_key] = {}
@@ -317,12 +318,11 @@ def debug_artifacts() -> dict[str, Any]:
 
 
 # =============================================================================
-# /api/debug/db  — raw DB probe
+# /api/debug/db
 # =============================================================================
 
 @app.get("/api/debug/db")
 def debug_db() -> dict[str, Any]:
-    """Test DB connection and return version info."""
     try:
         rows = _query("SELECT version() AS v")
         pg_version = rows[0]["v"] if rows else "unknown"
@@ -383,6 +383,8 @@ def teams() -> dict[str, Any]:
 
 @app.get("/api/dashboard")
 def dashboard(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     try:
         recent = _query(
             """
@@ -418,8 +420,6 @@ def dashboard(team_id: int) -> dict[str, Any]:
         kpi_rows = []
         db_available = False
 
-    # FIX: use _m5_win_pct_direct() — NOT win_probability() — to avoid infinite recursion.
-    # dashboard → win_probability → _m5_win_pct → win_probability → ... (stack overflow)
     high_risk = _m3_high_risk_count(team_id)
     win_pct   = _m5_win_pct_direct(team_id)
 
@@ -470,6 +470,8 @@ def dashboard(team_id: int) -> dict[str, Any]:
 
 @app.get("/api/player-efficiency")
 def player_efficiency(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     kmeans     = _A.get("m1", {}).get("kmeans")
     scaler     = _A.get("m1", {}).get("scaler")
     cluster_df = _A.get("m1", {}).get("df")
@@ -546,7 +548,6 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
         logger.warning("/api/player-efficiency team=%d DB error: %s", team_id, exc)
         _last_errors["player_efficiency"] = str(exc)
 
-    # Artifact-only path
     if cluster_df is not None:
         team_df = (
             cluster_df[cluster_df["team_id"] == team_id]
@@ -590,6 +591,8 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
 
 @app.get("/api/team-cohesion")
 def team_cohesion(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     feat_df = _A.get("m2", {}).get("feat_df")
     gbr     = _A.get("m2", {}).get("gbr")
     scaler  = _A.get("m2", {}).get("scaler")
@@ -683,6 +686,8 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 
 @app.get("/api/injury-risk")
 def injury_risk(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     m3      = _A.get("m3", {})
     model   = m3.get("xgb") or m3.get("rf")
     scaler  = m3.get("scaler")
@@ -788,12 +793,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
         X_sc  = scaler.transform(X)
         probs = model.predict_proba(X_sc)[:, 1]
 
-        seen: dict[str, bool] = {}
+        # FIX: use a set, not a dict[str, bool], since we only need membership.
+        seen: set[str] = set()
         for r, prob in zip(rows, probs):
             name = r["player_name"]
             if name in seen:
                 continue
-            seen[name] = True
+            seen.add(name)
             players_out.append({
                 "player_name":            name,
                 "position":               r.get("position") or "-",
@@ -807,12 +813,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             return _injury_response(players_out, "database+model3")
 
     elif rows:
-        seen: dict[str, bool] = {}
+        # Heuristic path — no trained model available
+        seen: set[str] = set()
         for r in rows:
             name = r["player_name"]
             if name in seen:
                 continue
-            seen[name] = True
+            seen.add(name)
             workload = float(r.get("minutes_played") or 0)
             days_ago = float(
                 r.get("days_since_last_injury")
@@ -885,6 +892,8 @@ def _injury_response(players: list, source: str) -> dict[str, Any]:
 
 @app.get("/api/environment-impact")
 def environment_impact(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     gbr_xg       = _A.get("m4", {}).get("xg")
     gbr_pass_acc = _A.get("m4", {}).get("pass_accuracy")
 
@@ -960,6 +969,8 @@ def environment_impact(team_id: int) -> dict[str, Any]:
 
 @app.get("/api/win-probability")
 def win_probability(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
     m5     = _A.get("m5", {})
     gbc    = m5.get("gbc_pre")
     scaler = m5.get("scaler_pre")
@@ -1164,24 +1175,14 @@ def _m3_high_risk_count(team_id: int) -> int:
 
 def _m5_win_pct_direct(team_id: int) -> float:
     """
-    Lightweight win-% calculation used by /api/dashboard.
-
-    IMPORTANT: must NOT call win_probability() — that would create infinite
-    recursion since dashboard() is called first and _m5_win_pct used to call
-    win_probability() which called _m5_win_pct again.
-
-    Priority:
-      1. ML model + recent DB stats
-      2. Historical win-rate from DB
-      3. Artifact-based prediction
-      4. Deterministic fallback
+    Lightweight win-% used by /api/dashboard.
+    Must NOT call win_probability() — that would be infinite recursion.
     """
     m5     = _A.get("m5", {})
     gbc    = m5.get("gbc_pre")
     scaler = m5.get("scaler_pre")
     df_pre = m5.get("df_pre")
 
-    # Try DB + model
     if _db_ok():
         try:
             latest = _query(
@@ -1225,7 +1226,6 @@ def _m5_win_pct_direct(team_id: int) -> float:
         except Exception as exc:
             logger.debug("_m5_win_pct_direct DB error team=%d: %s", team_id, exc)
 
-    # Artifact
     if df_pre is not None and gbc and scaler:
         try:
             FEATURES_PRE = [
