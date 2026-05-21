@@ -7,25 +7,20 @@ A data pipeline and machine learning system built on StatsBomb open data, Open-M
 ## Quick Start
 
 ### Requirements
-
 - Python 3.11+
 - PostgreSQL 14+
 - ~4 GB disk for raw data and DB
 
+### 1. Set up the environment
+
 ```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 1. Configure paths
-
-Edit `config/settings.py`:
-
-```python
-DB_DSN                    = "postgresql://user:pass@localhost:5432/soccer_db"
-DATA_ROOT                 = "/path/to/open-data-master/data"
-TRANSFERMARKT_CSV         = "/path/to/transfermarkt_injuries.csv"
-TRANSFERMARKT_PLAYERS_CSV = "/path/to/transfermarkt_players.csv"
-```
+Copy the example env file and fill in your values:
+Edit .env — set DB_DSN, DATA_ROOT, TRANSFERMARKT_CSV, TRANSFERMARKT_PLAYERS_CSV
 
 ### 2. Create the database schema
 
