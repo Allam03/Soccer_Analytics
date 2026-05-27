@@ -1,33 +1,17 @@
 /* ============================================================
-   main.js  — v2.2.0
-   Entry point.  Wires all modules together.
+   main.js  — v2.3.0
 
-   Changes vs v2.1.0
+   Changes vs v2.2.0
    -----------------
-   RACE CONDITION FIX
-   - Navigation.init() now runs AFTER pagesLoadedPromise resolves, not before.
-     Previously: nav init → user clicks → renderXxx() → querySelector finds
-     nothing (page HTML not yet injected) → silent blank section.
-   - Charts are only initialised when their page is active, guarded by
-     requestAnimationFrame to ensure the canvas is in the layout.
-
-   ERROR VISIBILITY
-   - Every API fetch error and render error is surfaced in the UI via
-     showError() which injects a visible red banner into the relevant page.
-   - Console.debug() used for verbose diagnostics; console.error() for real
-     errors; no more silent console.warn-and-move-on.
-   - _safeRender() wrapper catches and displays render-path exceptions.
-
-   LOADING STATES
-   - Each page section gets a "Loading..." skeleton while the API request
-     is in-flight; replaced with real content on success.
-   - The data-source badge colour now accurately reflects mixed / error states.
-
-   OTHER
-   - refreshAllData() only re-renders the currently active page immediately;
-     other pages are lazily rendered on first navigation (avoids chart sizing
-     bugs for off-screen canvases).
-   - _pendingRender set tracks which pages need a fresh render on next visit.
+   RACE CONDITION FIX (squad status cards)
+   - renderSquadStatusCards() is no longer called inside renderDashboard().
+     Previously, dashboard data could resolve before injury data, leaving
+     AppState.injury null when renderDashboard ran, resulting in a silently
+     empty squad grid with only a debug log.
+   - Squad cards now render in refreshAllData() only after both dashboard
+     AND injury data have resolved, regardless of which arrived first.
+     renderDashboard() still renders everything else (KPIs, trend chart)
+     immediately when its data is available.
    ============================================================ */
 
 const AppState = {
@@ -40,7 +24,6 @@ const AppState = {
   winprob:     null,
 };
 
-// Track which pages have stale data and need re-rendering on navigation
 const _pendingRender = new Set();
 
 // ---------------------------------------------------------------------------
@@ -50,17 +33,14 @@ const _pendingRender = new Set();
 document.addEventListener("DOMContentLoaded", async () => {
   debug("DOMContentLoaded fired");
 
-  // Wait for page HTML to be injected BEFORE setting up navigation clicks.
-  // This eliminates the race where a user clicks a nav item before innerHTML
-  // has been written, leaving renderXxx() unable to find any DOM nodes.
   if (window.pagesLoadedPromise) {
     debug("Waiting for pagesLoadedPromise...");
     await window.pagesLoadedPromise;
     debug("Pages loaded, DOM ready");
   }
 
-  Navigation.init();           // safe now — all page HTML is present
-  Navigation.onNavigate = onPageActivated;  // hook into navigation events
+  Navigation.init();
+  Navigation.onNavigate = onPageActivated;
   setupTooltips();
   await bootstrap();
 });
@@ -130,7 +110,6 @@ async function refreshAllData() {
 
   document.querySelectorAll(".kpi-value").forEach((el) => el.classList.add("shimmer"));
 
-  // Mark all pages as needing re-render
   ["dashboard", "player", "cohesion", "injury", "env", "winprob"].forEach(
     (p) => _pendingRender.add(p)
   );
@@ -146,7 +125,6 @@ async function refreshAllData() {
 
   const [dashRes, playerRes, cohesionRes, injuryRes, envRes, winprobRes] = results;
 
-  // Log any fetch-level failures
   const labels = ["dashboard", "player", "cohesion", "injury", "environment", "winprob"];
   results.forEach((r, i) => {
     if (r.status === "rejected") {
@@ -163,12 +141,17 @@ async function refreshAllData() {
   AppState.environment = envRes.status    === "fulfilled" ? envRes.value    : null;
   AppState.winprob     = winprobRes.status === "fulfilled" ? winprobRes.value : null;
 
-  // Always render the active page immediately; others render on demand
   const activePage = document.querySelector(".page.active")?.id?.replace("page-", "") || "dashboard";
   debug("Active page is:", activePage);
   renderPage(activePage);
 
-  // Badge reflects worst status across all endpoints
+  // Squad cards depend on both dashboard (for the grid container) and injury
+  // data (for risk scores). Render them here, after both have settled, rather
+  // than inside renderDashboard() where injury data may not yet be available.
+  if (activePage === "dashboard") {
+    renderSquadStatusCards();
+  }
+
   const sources = results
     .filter((r) => r.status === "fulfilled")
     .map((r) => r.value?.source)
@@ -188,13 +171,19 @@ async function refreshAllData() {
 }
 
 // ---------------------------------------------------------------------------
-// Navigation hook — render page on first visit after data loaded
+// Navigation hook
 // ---------------------------------------------------------------------------
 
 function onPageActivated(pageId) {
   debug("onPageActivated:", pageId);
   if (_pendingRender.has(pageId)) {
     renderPage(pageId);
+    // Squad cards are tied to the dashboard page and need injury data.
+    // Render them here on navigation too, in case this is a lazy first visit
+    // after all data has already loaded.
+    if (pageId === "dashboard") {
+      renderSquadStatusCards();
+    }
   }
 }
 
@@ -211,7 +200,6 @@ function renderPage(pageId) {
   }
 }
 
-// Wrap each render function so exceptions are caught and shown in the UI
 function _safeRender(fn, pageId) {
   try {
     fn();
@@ -239,12 +227,15 @@ function renderDashboard() {
   if (values[2]) values[2].textContent = String(kpi.high_risk_players);
   if (values[3]) values[3].textContent = `${kpi.next_match_win_pct.toFixed(1)}%`;
 
-  // Charts need the canvas to be in the visible layout — use rAF
   requestAnimationFrame(() => {
     Charts.initPerfTrend(AppState.dashboard.performance_trend);
   });
 
-  renderSquadStatusCards();
+  // Squad status cards are intentionally NOT rendered here.
+  // They are rendered in refreshAllData() and onPageActivated() after both
+  // dashboard and injury data have resolved, preventing a silent empty grid
+  // when injury data arrives after dashboard data.
+
   animateCards();
   animateProgressBars();
 }
@@ -400,7 +391,6 @@ function renderCohesion() {
   if (values[2]) values[2].textContent = (kpi.avg_degree       || 0).toFixed(1);
   if (values[3]) values[3].textContent = (kpi.clustering_coeff || 0).toFixed(2);
 
-  // PassNetwork reads SVG dimensions — must run after layout is stable
   requestAnimationFrame(() => {
     PassNetwork.init(data.edges && data.edges.length ? data.edges : null);
   });
@@ -679,7 +669,6 @@ function showPageError(pageId, message) {
   console.error(`[page:${pageId}]`, message);
   const container = document.querySelector(`#page-${pageId} .kpi-grid`);
   if (!container) return;
-  // Add a subtle inline error note rather than replacing content
   const existing = document.querySelector(`#page-${pageId} .page-error-note`);
   if (existing) existing.remove();
   const el = document.createElement("div");
@@ -730,11 +719,11 @@ function updateDataSourceBadge(source) {
     "database+model4":     { text: "Data: DB + Model 4", color: "#22d3ee" },
     "database+model5":     { text: "Data: DB + Model 5", color: "#22d3ee" },
     artifact:              { text: "Data: ML Artifact",  color: "#f59e0b" },
-    mixed:                 { text: "Data: Mixed",         color: "#22d3ee" },
-    fallback:              { text: "Data: Demo",          color: "#f59e0b" },
+    mixed:                 { text: "Data: Mixed",        color: "#22d3ee" },
+    fallback:              { text: "Data: Demo",         color: "#f59e0b" },
     "fallback+artifact":   { text: "Data: Demo + Model", color: "#f59e0b" },
-    error:                 { text: "Data: Error",         color: "#ef4444" },
-    unknown:               { text: "Data: Unknown",       color: "#94a3b8" },
+    error:                 { text: "Data: Error",        color: "#ef4444" },
+    unknown:               { text: "Data: Unknown",      color: "#94a3b8" },
   };
   const item = map[source] || map.unknown;
   badge.textContent       = item.text;
@@ -808,7 +797,6 @@ function debounce(fn, delay = 200) {
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay); };
 }
 
-// Verbose logging helper — enable by setting localStorage.debug = '1'
 function debug(...args) {
   if (localStorage.getItem("debug") === "1") {
     console.debug("[soccer-analytics]", ...args);
