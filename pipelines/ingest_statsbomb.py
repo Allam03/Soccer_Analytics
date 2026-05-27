@@ -5,12 +5,18 @@ High-performance StatsBomb ingestion pipeline.
 
 Fixes in this version
 ---------------------
+- stadium_cache is now pre-populated from the DB at the start of run() so
+  re-runs do not re-upsert every stadium, and partial-run restarts cannot
+  overwrite real coordinates with NULL.
+- pg_match_id is now captured directly from upsert_match() return value
+  instead of being re-queried per match inside _write_results(), removing
+  one redundant SELECT per match in every batch.
 - team_name empty string bug: player-team registrations called
   team_cache.get_or_create(sb_tid, "") which could overwrite real names
-  with blank placeholders.  TeamCache now guards against this.
+  with blank placeholders. TeamCache now guards against this.
 - weather_id NULL: StatsBomb runs before weather, so weather_cache is
-  always empty at write time.  weather_id is left NULL here and backfilled
-  by ingest_weather.py after it runs (see load/postgres.py update_weather_ids).
+  always empty at write time. weather_id is left NULL here and backfilled
+  by ingest_weather.py after it runs.
 - Schema rename: statsbomb_match_id -> sb_match_id, statsbomb_team_id ->
   sb_team_id, statsbomb_player_id -> sb_player_id throughout.
 - Stadium refactor: matches no longer carries stadium_name/lat/lng directly.
@@ -58,7 +64,6 @@ class MatchResult:
     player_team:  dict = field(default_factory=dict)   # sb_pid -> (name, sb_tid)
     player_stats: dict = field(default_factory=dict)   # sb_pid -> stats_dict
     pass_edges_sb: list = field(default_factory=list)
-    # After pass_edges_sb field:
     starting_positions: dict = field(default_factory=dict)  # sb_pid -> position_name
     minute_snapshots: dict   = field(default_factory=dict)  # (sb_tid, minute) -> stats
 
@@ -110,7 +115,6 @@ def _process_match(
         result.pass_edges_sb = _extract_pass_edges_sb(
             events, type_col, player_id_col, team_id_col, sb_match_id
         )
-        # Extract starting positions from lineups
         from transform.features import extract_starting_positions, build_minute_snapshots
         try:
             lineups_df = sb.lineups(sb_match_id)
@@ -118,7 +122,6 @@ def _process_match(
         except Exception as exc:
             logger.debug("Lineup load failed for match %d: %s", sb_match_id, exc)
 
-        # Build minute snapshots for Model 5 in-game sub-model
         result.minute_snapshots = build_minute_snapshots(
             events,
             home_team["home_team_id"],
@@ -174,6 +177,7 @@ def _extract_pass_edges_sb(events, type_col, player_id_col, team_id_col, sb_matc
 # ---------------------------------------------------------------------------
 # DB writer (main process)
 # ---------------------------------------------------------------------------
+
 def _upsert_snapshots(conn, rows: list, page_size: int = 1000):
     from psycopg2.extras import execute_values
     with conn.cursor() as cur:
@@ -186,29 +190,29 @@ def _upsert_snapshots(conn, rows: list, page_size: int = 1000):
             ) VALUES %s
             ON CONFLICT (match_id, team_id, minute) DO NOTHING
         """, rows, page_size=page_size)
-        
+
+
 def _write_results(conn, team_cache, player_cache, results, weather_cache,
                    stadium_cache: dict):
     """
     Persist a batch of MatchResult objects.
 
     stadium_cache: mutable dict {stadium_name -> stadium_id} maintained across
-    batches to avoid redundant upsert_stadium calls within the same run.
+    batches. Pre-populated from DB at the start of run() so re-runs and
+    partial-run restarts do not overwrite existing stadium coordinates with NULL.
     """
-    all_stat_rows = []
-    all_edge_rows = []
+    all_stat_rows     = []
+    all_edge_rows     = []
+    all_snapshot_rows = []
 
     for res in results:
         if res.error:
             logger.error("Match %d worker error: %s", res.sb_match_id, res.error)
             continue
 
-        # Register home/away teams with real names first
         team_cache.get_or_create(res.home_sb_id, res.home_name)
         team_cache.get_or_create(res.away_sb_id, res.away_name)
 
-        # Register player teams — only pass name if we have one; blank string
-        # must NOT overwrite a real name already staged for the same sb_tid
         for sb_pid, (p_name, sb_tid) in res.player_team.items():
             player_cache.get_or_create(sb_pid, p_name)
             team_cache.get_or_create(sb_tid, "")
@@ -216,7 +220,6 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
         team_cache.flush()
         player_cache.flush()
 
-        # Resolve or create the stadium row
         stadium_id: Optional[int] = None
         if res.stadium_name:
             if res.stadium_name not in stadium_cache:
@@ -234,6 +237,7 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
         else:
             result_map = {res.home_sb_id: "draw", res.away_sb_id: "draw"}
 
+        # Capture pg_match_id directly from upsert_match — no re-query needed.
         pg_match_id = upsert_match(conn, {
             "sb_match_id":  res.sb_match_id,
             "match_date":   res.match_date,
@@ -246,7 +250,6 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
             "stadium_id":   stadium_id,
         })
 
-        # weather_id is NULL at this stage; backfilled by ingest_weather
         weather_id = weather_cache.get(pg_match_id)
 
         for sb_pid, stats in res.player_stats.items():
@@ -273,7 +276,7 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
                 stats["clearances"], stats["pressures"],
                 stats["yellow_cards"], stats["red_cards"],
                 stats["minutes_played"], stats["sub_minute"],
-                res.starting_positions.get(sb_pid),   # starting_position
+                res.starting_positions.get(sb_pid),
             ))
 
         for (_, sb_tid, sb_pid, sb_rid, n, axs, ays, axe, aye) in res.pass_edges_sb:
@@ -288,37 +291,21 @@ def _write_results(conn, team_cache, player_cache, results, weather_cache,
                 n, axs, ays, axe, aye,
             ))
 
-    insert_stats(conn, all_stat_rows)
-    # Write minute snapshots
-    all_snapshot_rows = []
-    for res in results:
-        if res.error:
-            continue
-        if not res.minute_snapshots:
-            continue
-        # We need to resolve pg_match_id and pg_team_id for this result.
-        # Re-resolve: match was already upserted above so we look it up.
-        with conn.cursor() as cur_inner:
-            cur_inner.execute(
-                "SELECT match_id FROM matches WHERE sb_match_id = %s",
-                (res.sb_match_id,)
-            )
-            row = cur_inner.fetchone()
-        if not row:
-            continue
-        pg_mid = row[0]
+        # Build snapshot rows using the already-resolved pg_match_id.
         for (sb_tid, minute), snap in res.minute_snapshots.items():
             try:
                 pg_tid = team_cache.resolve(sb_tid)
             except KeyError:
                 continue
             all_snapshot_rows.append((
-                pg_mid, pg_tid, minute,
+                pg_match_id, pg_tid, minute,
                 snap["goals_so_far"], snap["xg_so_far"],
                 snap["shots_so_far"], snap["passes_so_far"],
                 snap["pass_acc_so_far"], snap["pressures_so_far"],
                 snap["red_cards_so_far"],
             ))
+
+    insert_stats(conn, all_stat_rows)
     if all_snapshot_rows:
         _upsert_snapshots(conn, all_snapshot_rows)
     upsert_pass_edges(conn, all_edge_rows)
@@ -335,8 +322,12 @@ def run(conn, team_cache, player_cache, weather_cache=None,
     if weather_cache is None:
         weather_cache = {}
 
-    # Shared stadium name -> stadium_id cache for the duration of this run
-    stadium_cache: dict[str, int] = {}
+    # Pre-populate stadium cache from DB so re-runs skip redundant upserts
+    # and partial-run restarts cannot overwrite real coordinates with NULL.
+    with conn.cursor() as cur:
+        cur.execute("SELECT stadium_name, stadium_id FROM stadiums")
+        stadium_cache: dict[str, int] = dict(cur.fetchall())
+    logger.info("Stadium cache pre-loaded: %d entries", len(stadium_cache))
 
     comps = sb.competitions()
     if COMPETITIONS:

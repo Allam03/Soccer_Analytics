@@ -3,18 +3,11 @@ pipelines/ingest_injuries.py
 
 Load Transfermarkt data from two CSVs into the database.
 
-Matching strategy
------------------
-Priority 1  TM ID already in DB
-Priority 2  Exact norm_name match
-Priority 3  Token-subset match (handles middle-name mismatches)
-Priority 4  Blocking + RapidFuzz (handles transliteration / umlaut variants)
-
-Schema
-------
-players.sb_player_id   (was statsbomb_player_id)
-players.tm_player_id   INT  (changed from TEXT — cast on read/write)
-injuries               UNIQUE(player_id, injury_date, injury_type) — ON CONFLICT DO NOTHING
+Fix: date_of_birth null check simplified. The original nested
+pd.notna(row.get(...) if "date_of_birth" in row.index else None)
+pattern was fragile — it called .get() twice and would silently
+return None for empty-string nulls. Replaced with a direct notna
+check on the extracted value.
 """
 
 import logging
@@ -44,7 +37,6 @@ FULL_THRESHOLD = 85
 # ---------------------------------------------------------------------------
 
 def _to_tm_id(raw) -> int | None:
-    """Convert a raw TM player ID value to int (schema stores INT, not TEXT)."""
     if not pd.notna(raw):
         return None
     try:
@@ -62,16 +54,10 @@ def _detect_id_col(df: pd.DataFrame, label: str = "") -> str | None:
 
 
 def _parse_dates(series: pd.Series) -> pd.Series:
-    """
-    Try known Transfermarkt date formats in order.
-    The Kaggle CSV uses 'Jul 10, 2023' (%b %d, %Y).
-    Falls back to pandas inference if no format matches > 80% of rows.
-    """
     for fmt in ("%b %d, %Y", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
         parsed = pd.to_datetime(series, format=fmt, errors="coerce")
         if parsed.notna().mean() > 0.8:
             return parsed.dt.date
-    # Last resort
     parsed = pd.to_datetime(series, errors="coerce")
     null_rate = parsed.isna().mean()
     if null_rate > 0.1:
@@ -87,7 +73,7 @@ def _parse_dates(series: pd.Series) -> pd.Series:
 
 class PlayerIndex:
     def __init__(self, conn):
-        self.tm_id_map: dict[int, int]         = {}   # tm_id (int) -> player_id
+        self.tm_id_map: dict[int, int]         = {}
         self.norm_map:  dict[str, int]          = {}
         self.token_map: dict[frozenset, int]    = {}
         self.blocks:    dict[str, list[tuple]]  = {}
@@ -145,12 +131,10 @@ def _resolve(row, index, last_threshold, full_threshold):
 
     candidates = _candidate_norms(row)
 
-    # Exact norm
     for nn in candidates:
         if nn in index.norm_map:
             return index.norm_map[nn], "exact"
 
-    # Token subset
     for nn in candidates:
         ct = frozenset(nn.split())
         if not ct:
@@ -159,7 +143,6 @@ def _resolve(row, index, last_threshold, full_threshold):
         if len(hits) == 1:
             return hits[0], "token_subset"
 
-    # Fuzzy (RapidFuzz)
     if _RAPIDFUZZ:
         last_raw = str(row.get("last_name") or "").strip()
         if last_raw:
@@ -220,8 +203,12 @@ def ingest_players(conn, players_csv, last_threshold=LAST_THRESHOLD,
         by_method[method] = by_method.get(method, 0) + 1
         linked += 1
 
-        tm_id = _to_tm_id(row.get("transfermarkt_player_id"))   # int | None
-        dob   = row.get("date_of_birth") if pd.notna(row.get("date_of_birth") if "date_of_birth" in row.index else None) else None
+        tm_id = _to_tm_id(row.get("transfermarkt_player_id"))
+
+        # Simplified null check: extract once, test once.
+        dob_raw = row.get("date_of_birth")
+        dob = dob_raw if pd.notna(dob_raw) else None
+
         nat   = (str(row.get("country_of_citizenship") or "").strip()
                  or str(row.get("country_of_birth") or "").strip() or None) or None
         pos   = (str(row.get("sub_position") or "").strip()
@@ -256,7 +243,7 @@ def ingest_players(conn, players_csv, last_threshold=LAST_THRESHOLD,
         cur.execute("SELECT COUNT(*) FROM players WHERE tm_player_id IS NOT NULL")
         logger.info("Players with TM id in DB: %d", cur.fetchone()[0])
 
-    return index.tm_id_map  # {tm_id (int) -> player_id}
+    return index.tm_id_map
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +278,7 @@ def ingest_injuries(conn, injuries_csv, tm_id_map: dict[int, int]):
     unmatched = 0
 
     for _, row in df.iterrows():
-        tm_id = _to_tm_id(row.get("player_id"))   # int | None
+        tm_id = _to_tm_id(row.get("player_id"))
         if tm_id is None or tm_id not in tm_id_map:
             unmatched += 1
             continue
@@ -299,8 +286,24 @@ def ingest_injuries(conn, injuries_csv, tm_id_map: dict[int, int]):
         matched += 1
         date_from  = row.get("from")
         date_until = row.get("until")
-        if not date_from or not date_until:
-            logger.warning("Injury row with missing dates: %s", row.to_dict())
+
+        # injury_date (from) is NOT NULL in the schema. Skip rows where it is
+        # missing rather than attempting an insert that will always fail.
+        if not date_from or not pd.notna(date_from):
+            logger.warning(
+                "Skipping injury row with null injury_date for player tm_id=%s: %s",
+                tm_id, row.get("injury"),
+            )
+            matched -= 1
+            unmatched += 1
+            continue
+
+        if not date_until or not pd.notna(date_until):
+            logger.warning(
+                "Injury row missing return_date for player tm_id=%s, inserting with NULL return_date",
+                tm_id,
+            )
+
         rows.append((
             tm_id_map[tm_id],
             str(row.get("injury") or "").strip() or None,

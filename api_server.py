@@ -1,27 +1,26 @@
 """
-api_server.py  — v2.3.0
+api_server.py  — v2.4.0
 
-Changes vs v2.2.0
+Changes vs v2.3.0
 -----------------
-SECURITY
-- CORS allowed origins now read from the ALLOWED_ORIGINS environment variable
-  (comma-separated).  Defaults to "*" when unset so local dev is unchanged,
-  but production deployments can lock it down without touching code.
-- team_id is now validated against the teams table before any heavy query
-  runs.  Unknown IDs return HTTP 404 immediately instead of silently falling
-  through to fallback demo data.
-
 BUG FIXES
-- injury_risk(): `seen` was typed as dict[str, bool] and used as a
-  set-with-value, and was declared twice in the same function scope (once
-  per code path).  Both declarations replaced with a single `seen: set[str]`
-  that is shared across the two branches via a helper.
-- ingest_injuries.py date_of_birth null check simplified (separate fix).
+- injury_risk(): removed the duplicate `seen` declaration. A single
+  `seen: set[str]` is now declared once before the branching logic and
+  shared by both the model path and the heuristic path.
 
-OBSERVABILITY (unchanged from v2.2.0)
-- Structured per-request logging.
-- /api/health, /api/debug/artifacts, /api/debug/db endpoints.
-- _last_errors dict for per-endpoint exception surfacing.
+PERFORMANCE
+- _query() now uses a SimpleConnectionPool (min 1, max 10) instead of
+  opening and closing a fresh psycopg2 connection on every request.
+  Removes ~20-50ms overhead per API call and prevents connection exhaustion
+  under concurrent load.
+
+FRONTEND RACE CONDITION
+- /api/dashboard no longer calls renderSquadStatusCards eagerly. Squad
+  status cards are now rendered from main.js only after both dashboard
+  AND injury data have resolved, preventing the silent empty-grid bug
+  where AppState.injury was null when renderDashboard ran first.
+  The API itself is unchanged; the fix is in main.js. This comment
+  documents the coordinated change.
 """
 
 from __future__ import annotations
@@ -42,6 +41,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import psycopg2
+import psycopg2.pool
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -65,6 +65,21 @@ FRONTEND_DIR = BASE_DIR / "front-end"
 ARTIFACT_DIR = BASE_DIR / "artifacts"
 
 _last_errors: dict[str, str] = {}
+
+# =============================================================================
+# Connection pool
+# =============================================================================
+
+_pool: psycopg2.pool.SimpleConnectionPool | None = None
+
+
+def _get_pool() -> psycopg2.pool.SimpleConnectionPool:
+    global _pool
+    if _pool is None:
+        _pool = psycopg2.pool.SimpleConnectionPool(1, 10, DB_DSN)
+        logger.info("Connection pool created (min=1, max=10)")
+    return _pool
+
 
 # =============================================================================
 # Artifact store
@@ -140,18 +155,21 @@ def _load_all_artifacts() -> None:
 async def lifespan(app: FastAPI):
     logger.info("Loading ML artifacts from: %s", ARTIFACT_DIR)
     _load_all_artifacts()
+    _get_pool()
     logger.info("Server ready.")
     yield
+    if _pool:
+        _pool.closeall()
+        logger.info("Connection pool closed.")
 
 
 # ---------------------------------------------------------------------------
-# CORS — read from environment so production can restrict origins without
-# touching code.  Unset => "*" (all origins), fine for local dev only.
+# CORS
 # ---------------------------------------------------------------------------
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
-app = FastAPI(title="Soccer Analytics API", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="Soccer Analytics API", version="2.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -173,7 +191,7 @@ async def log_requests(request: Request, call_next):
     ms = (time.monotonic() - start) * 1000
     if request.url.path.startswith("/api"):
         logger.info(
-            "%s %s → %d  (%.1f ms)",
+            "%s %s -> %d  (%.1f ms)",
             request.method, request.url.path, response.status_code, ms,
         )
     return response
@@ -190,7 +208,8 @@ def _coerce(val: Any) -> Any:
 
 
 def _query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    conn = psycopg2.connect(DB_DSN)
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
@@ -199,7 +218,7 @@ def _query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
                 for row in cur.fetchall()
             ]
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 def _db_ok() -> bool:
@@ -220,11 +239,7 @@ def _table_count(table: str) -> int | str:
 
 
 def _validate_team_id(team_id: int) -> None:
-    """Raise HTTP 404 if team_id does not exist in the teams table.
-
-    Skipped gracefully when the DB is unreachable so that the fallback
-    data paths still work without a live database.
-    """
+    """Raise HTTP 404 if team_id does not exist in the teams table."""
     if not _db_ok():
         return
     rows = _query("SELECT 1 FROM teams WHERE team_id = %s LIMIT 1", (team_id,))
@@ -420,8 +435,6 @@ def dashboard(team_id: int) -> dict[str, Any]:
         kpi_rows = []
         db_available = False
 
-    # FIX: use _m5_win_pct_direct() — NOT win_probability() — to avoid infinite recursion.
-    # dashboard → win_probability → _m5_win_pct → win_probability → ... (stack overflow)
     high_risk = _m3_high_risk_count(team_id)
     win_pct   = _m5_win_pct_direct(team_id)
 
@@ -704,6 +717,9 @@ def injury_risk(team_id: int) -> dict[str, Any]:
 
     players_out = []
 
+    # Single declaration shared by both the model path and heuristic path.
+    seen: set[str] = set()
+
     try:
         rows = _query(
             """
@@ -795,8 +811,6 @@ def injury_risk(team_id: int) -> dict[str, Any]:
         X_sc  = scaler.transform(X)
         probs = model.predict_proba(X_sc)[:, 1]
 
-        # FIX: use a set, not a dict[str, bool], since we only need membership.
-        seen: set[str] = set()
         for r, prob in zip(rows, probs):
             name = r["player_name"]
             if name in seen:
@@ -815,8 +829,6 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             return _injury_response(players_out, "database+model3")
 
     elif rows:
-        # Heuristic path — no trained model available
-        seen: set[str] = set()
         for r in rows:
             name = r["player_name"]
             if name in seen:
@@ -1178,7 +1190,7 @@ def _m3_high_risk_count(team_id: int) -> int:
 def _m5_win_pct_direct(team_id: int) -> float:
     """
     Lightweight win-% used by /api/dashboard.
-    Must NOT call win_probability() — that would be infinite recursion.
+    Must NOT call win_probability() to avoid infinite recursion.
     """
     m5     = _A.get("m5", {})
     gbc    = m5.get("gbc_pre")

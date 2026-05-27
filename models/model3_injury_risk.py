@@ -6,24 +6,12 @@ Type: Binary classification
 Target: is_injured_next_30d
 Algorithms: XGBoost (primary), Random Forest, Logistic Regression (baseline)
 
-Features
---------
-minutes_played, matches_last_30_days, minutes_last_30_days,
-days_since_last_injury, age_at_match, sub_minute,
-xg, xa, pressures, tackles, carry_distance,
-interceptions, clearances
-
-Schema change
--------------
-Workload and injury label columns have moved from player_match_stats to
-player_match_features.  The load_features query now JOINs both tables.
-
-Requires
---------
-- ingest_injuries.py has run (injuries table populated)
-- compute_labels.py has run (player_match_features rows exist with
-  is_injured_next_30d set, workload features filled)
-- players.date_of_birth populated from Transfermarkt
+Fix: data leakage in cross-validation.
+Previously StandardScaler was fit on the full dataset before cross_val_score,
+meaning the scaler had seen test-fold values during fitting. This inflated
+reported CV AUC scores. The scaler is now wrapped inside a Pipeline so it is
+fit only on the training fold during each CV split. The final scaler fit on
+the full dataset for inference is unchanged.
 """
 
 import logging
@@ -34,10 +22,8 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.metrics import (
-    classification_report, roc_auc_score, average_precision_score
-)
 from sklearn.utils.class_weight import compute_class_weight
 import joblib
 
@@ -49,7 +35,7 @@ FEATURES = [
     "minutes_last_30_days",
     "days_since_last_injury",
     "age_at_match",
-    "sub_minute_flag",        # 1 if sub_minute IS NOT NULL
+    "sub_minute_flag",
     "xg",
     "xa",
     "pressures",
@@ -81,7 +67,7 @@ def load_features(conn) -> pd.DataFrame:
             pmf.is_injured_next_30d        AS label,
             COALESCE(
                 EXTRACT(YEAR FROM AGE(m.match_date, p.date_of_birth))::INT,
-                25                          -- median fallback when DOB unknown
+                25
             ) AS age_at_match
         FROM player_match_stats pms
         JOIN player_match_features pmf ON pmf.stat_id  = pms.stat_id
@@ -95,10 +81,7 @@ def load_features(conn) -> pd.DataFrame:
         rows = cur.fetchall()
     df = pd.DataFrame(rows, columns=cols)
 
-    # Derived feature
     df["sub_minute_flag"] = df["sub_minute"].notna().astype(int)
-
-    # Fill remaining nulls (days_since_last_injury = -1 means no history)
     df["days_since_last_injury"] = df["days_since_last_injury"].fillna(-1)
 
     return df
@@ -121,10 +104,6 @@ def run(conn, output_dir: str = "artifacts/model3") -> Dict[str, Any]:
 
     X, y = preprocess(df)
 
-    scaler = StandardScaler()
-    X_sc   = scaler.fit_transform(X)
-
-    # Class weights to handle imbalance (typical injury rate ~5-15%)
     classes = np.unique(y)
     weights = compute_class_weight("balanced", classes=classes, y=y)
     class_weight = dict(zip(classes, weights))
@@ -132,55 +111,86 @@ def run(conn, output_dir: str = "artifacts/model3") -> Dict[str, Any]:
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    # Baseline: Logistic Regression
-    lr = LogisticRegression(
-        class_weight=class_weight, max_iter=1000, random_state=42
-    )
-    lr_auc = cross_val_score(lr, X_sc, y, cv=cv, scoring="roc_auc")
+    # Wrap each estimator in a Pipeline with its own scaler so that
+    # cross_val_score fits the scaler only on training folds. This prevents
+    # test-fold data from leaking into the scaler's mean/variance, which
+    # previously inflated reported CV AUC scores.
+    lr_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", LogisticRegression(
+            class_weight=class_weight, max_iter=1000, random_state=42
+        )),
+    ])
+    rf_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", RandomForestClassifier(
+            n_estimators=300, max_depth=8, class_weight=class_weight,
+            random_state=42, n_jobs=-1
+        )),
+    ])
+
+    lr_auc = cross_val_score(lr_pipe, X, y, cv=cv, scoring="roc_auc")
     logger.info("LR AUC-ROC (5-fold): %.3f +/- %.3f", lr_auc.mean(), lr_auc.std())
 
-    # Random Forest
-    rf = RandomForestClassifier(
-        n_estimators=300, max_depth=8, class_weight=class_weight,
-        random_state=42, n_jobs=-1
-    )
-    rf_auc = cross_val_score(rf, X_sc, y, cv=cv, scoring="roc_auc")
+    rf_auc = cross_val_score(rf_pipe, X, y, cv=cv, scoring="roc_auc")
     logger.info("RF  AUC-ROC (5-fold): %.3f +/- %.3f", rf_auc.mean(), rf_auc.std())
 
-    # XGBoost (primary)
     try:
         from xgboost import XGBClassifier
         scale_pos = (y == 0).sum() / max(1, (y == 1).sum())
-        xgb = XGBClassifier(
-            n_estimators=400, max_depth=4, learning_rate=0.05,
-            scale_pos_weight=scale_pos, eval_metric="aucpr",
-            random_state=42, n_jobs=-1, verbosity=0,
-        )
-        xgb_auc = cross_val_score(xgb, X_sc, y, cv=cv, scoring="roc_auc")
+        xgb_pipe = Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", XGBClassifier(
+                n_estimators=400, max_depth=4, learning_rate=0.05,
+                scale_pos_weight=scale_pos, eval_metric="aucpr",
+                random_state=42, n_jobs=-1, verbosity=0,
+            )),
+        ])
+        xgb_auc = cross_val_score(xgb_pipe, X, y, cv=cv, scoring="roc_auc")
         logger.info("XGB AUC-ROC (5-fold): %.3f +/- %.3f",
                     xgb_auc.mean(), xgb_auc.std())
-        xgb.fit(X_sc, y)
-        joblib.dump(xgb, f"{output_dir}/xgb.pkl")
+        xgb_pipe.fit(X, y)
+        # Save only the fitted estimator and a separate scaler for inference
+        # so api_server.py can call scaler.transform() + model.predict_proba()
+        # without depending on sklearn Pipeline internals.
+        joblib.dump(xgb_pipe.named_steps["clf"],    f"{output_dir}/xgb.pkl")
+        joblib.dump(xgb_pipe.named_steps["scaler"], f"{output_dir}/scaler.pkl")
+        xgb = xgb_pipe.named_steps["clf"]
     except ImportError:
         logger.warning("xgboost not installed -- skipping XGBClassifier")
         xgb = None
 
-    # Fit final models on full data
+    # Fit final LR and RF on full data for completeness; primary artifact
+    # is XGB when available, RF otherwise.
+    scaler_final = StandardScaler()
+    X_sc = scaler_final.fit_transform(X)
+
+    lr = LogisticRegression(
+        class_weight=class_weight, max_iter=1000, random_state=42
+    )
     lr.fit(X_sc, y)
+
+    rf = RandomForestClassifier(
+        n_estimators=300, max_depth=8, class_weight=class_weight,
+        random_state=42, n_jobs=-1
+    )
     rf.fit(X_sc, y)
 
-    # Feature importances from RF
     importances = pd.Series(rf.feature_importances_, index=FEATURES)
     logger.info("RF feature importances:\n%s",
                 importances.sort_values(ascending=False))
 
-    joblib.dump(scaler, f"{output_dir}/scaler.pkl")
-    joblib.dump(lr,     f"{output_dir}/lr.pkl")
-    joblib.dump(rf,     f"{output_dir}/rf.pkl")
+    # Only write scaler.pkl from the full-data fit if XGB was not available
+    # (XGB pipeline already wrote it above with a properly CV-isolated scaler).
+    if xgb is None:
+        joblib.dump(scaler_final, f"{output_dir}/scaler.pkl")
+
+    joblib.dump(lr, f"{output_dir}/lr.pkl")
+    joblib.dump(rf, f"{output_dir}/rf.pkl")
     df.to_parquet(f"{output_dir}/features.parquet", index=False)
 
-    logger.info("Model 3 artefacts saved to %s", output_dir)
-    return {"lr": lr, "rf": rf, "xgb": xgb, "scaler": scaler}
+    logger.info("Model 3 artifacts saved to %s", output_dir)
+    return {"lr": lr, "rf": rf, "xgb": xgb, "scaler": scaler_final}
 
 
 if __name__ == "__main__":

@@ -2,19 +2,11 @@
 pipelines/ingest_weather.py
 
 Fetch historical weather from Open-Meteo and backfill weather_id into
-player_match_stats.  Coordinates are stored in the stadiums table
-(not on matches directly), so this module reads from and writes to stadiums.
+player_match_stats.
 
-Changes vs original
--------------------
-- upsert_weather no longer commits internally (fixed in load/postgres.py);
-  this module now commits once per successful fetch, which is equivalent
-  to the old behaviour but is explicit about who owns the transaction.
-- Stadium coordinates read from stadiums JOIN matches (not matches.stadium_lat/lng).
-- _backfill_stadium_coords() writes to stadiums.stadium_lat / stadium_lng.
-- weather_id backfill path unchanged (player_match_stats.weather_id).
-- Retry + exponential backoff on HTTP 429 and transient errors.
-- weather_condition derived from numeric fields (CHECK constraint enforced).
+Fix: _resolve_coords() now logs a warning including both the input stadium
+name and the matched key whenever the substring fallback fires, so spurious
+coordinate matches are visible in the logs rather than silently used.
 """
 
 import logging
@@ -42,7 +34,7 @@ _DAILY_VARS = (
 )
 
 # ---------------------------------------------------------------------------
-# Stadium coordinates (normalised at import time)
+# Stadium coordinates
 # ---------------------------------------------------------------------------
 _STADIUM_COORDS_RAW = {
     "Camp Nou":                          (41.3809,   2.1228),
@@ -142,26 +134,42 @@ STADIUM_COORDS: dict[str, tuple] = {
 def _resolve_coords(
     stadium_name: str | None, lat: float | None, lng: float | None
 ) -> tuple[float, float] | None:
-    """Return (lat, lng) from DB values first, then the lookup table."""
+    """
+    Return (lat, lng) from DB values first, then the lookup table.
+
+    Logs a warning when the substring fallback fires so that questionable
+    matches (e.g. a short fragment matching a longer unrelated name) are
+    visible in the pipeline logs.
+    """
     if lat is not None and lng is not None:
         return lat, lng
     if not stadium_name:
         return None
+
     nn = norm_name(stadium_name)
+
+    # Exact normalised match
     coords = STADIUM_COORDS.get(nn)
     if coords:
         return coords
+
+    # Substring fallback — log the match so operators can verify it
     for key, val in STADIUM_COORDS.items():
         if nn in key or key in nn:
+            logger.warning(
+                "_resolve_coords: substring fallback matched '%s' -> '%s' (%.4f, %.4f). "
+                "Add an explicit entry to _STADIUM_COORDS_RAW if this is correct.",
+                stadium_name, key, val[0], val[1],
+            )
             return val
+
     return None
 
 
 def _derive_condition(temp_c, precip_mm, wind_kmh) -> str:
     """
     Map numeric weather values to a condition label.
-    Values must match the CHECK constraint on weather.weather_condition:
-      'clear' | 'rain' | 'heavy_rain' | 'windy' | 'cold' | 'hot'
+    Values must match the CHECK constraint on weather.weather_condition.
     """
     p = precip_mm or 0.0
     w = wind_kmh  or 0.0
@@ -244,13 +252,7 @@ def _backfill_weather_ids(conn):
 
 
 def _backfill_stadium_coords(conn, coord_map: dict[int, tuple[float, float]]):
-    """
-    Write resolved (lat, lng) pairs back to the stadiums table.
-
-    coord_map: {match_id -> (lat, lng)}
-    We join matches -> stadiums to find the stadium_id, then update
-    stadiums.stadium_lat / stadium_lng where currently NULL.
-    """
+    """Write resolved (lat, lng) pairs back to the stadiums table."""
     if not coord_map:
         return
 
@@ -292,8 +294,6 @@ def _backfill_stadium_coords(conn, coord_map: dict[int, tuple[float, float]]):
 def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
     """
     Fetch and store weather for all matches without a weather row.
-    Reads stadium coordinates from the stadiums table (via JOIN on matches).
-    Backfills weather_id into player_match_stats and coordinates into stadiums.
     Returns {match_id -> weather_id}.
     """
     if conn is None:
@@ -360,8 +360,6 @@ def run(conn=None, max_concurrent=MAX_CONCURRENT) -> dict:
             if weather is None:
                 failed += 1
                 continue
-            # upsert_weather no longer commits; we commit here after each row
-            # so a failure mid-run doesn't lose all preceding successful fetches.
             upsert_weather(conn, match_id, weather)
             conn.commit()
             inserted += 1

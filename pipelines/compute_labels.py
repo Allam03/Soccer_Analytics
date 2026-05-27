@@ -14,11 +14,13 @@ This pipeline now:
      row (INSERT … ON CONFLICT DO NOTHING).
   2. UPDATEs player_match_features for the three computed label passes.
 
-Workload fix (unchanged logic)
-------------------------------
-The original query used a LEFT JOIN with the date filter on the ON clause,
-which caused counts outside the window to still be included.  The correlated
-subquery approach used here avoids this by filtering inside a WHERE clause.
+Workload fix
+------------
+The join now also filters m_inner.match_id != m_outer.match_id to prevent
+same-match rows for other players on the same team from being counted inside
+the 30-day window. The original stat_id != stat_id guard was insufficient
+because two players on the same team in the same match share a match_date,
+so both rows could fall inside each other's windows.
 """
 
 import logging
@@ -95,8 +97,11 @@ def compute_workload(conn):
     """
     matches_last_30_days and minutes_last_30_days for each player-match row.
 
-    Uses a correlated subquery so the 30-day window filter applies correctly.
-    The original LEFT JOIN approach counted rows outside the window.
+    The join filters on both stat_id and match_id to ensure only prior matches
+    for the same player fall inside the 30-day window. Filtering by stat_id
+    alone was insufficient: two players on the same team share a match_date,
+    so a team-mate's row could satisfy the date range check for the outer row.
+    Filtering by match_id != match_id directly excludes same-match rows.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -115,9 +120,9 @@ def compute_workload(conn):
                     player_match_stats pms_inner
                     JOIN matches m_inner ON m_inner.match_id = pms_inner.match_id
                 ) ON  pms_inner.player_id  = pms_outer.player_id
-                  AND pms_inner.stat_id   != pms_outer.stat_id
-                  AND m_inner.match_date   >= m_outer.match_date - INTERVAL '30 days'
-                  AND m_inner.match_date    < m_outer.match_date
+                  AND pms_inner.match_id  != pms_outer.match_id
+                  AND m_inner.match_date  >= m_outer.match_date - INTERVAL '30 days'
+                  AND m_inner.match_date   < m_outer.match_date
                 GROUP BY pms_outer.stat_id
             ) sub
             WHERE pmf.stat_id = sub.stat_id

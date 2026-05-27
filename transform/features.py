@@ -2,6 +2,13 @@
 transform/features.py
 
 Vectorised per-player feature aggregation for one match.
+
+Fix: minutes_played for starting players who are not substituted off.
+Previously used the minute of their last recorded event, which could be
+well below 90 if they had no involvement late in the match. Now checks for
+a player_off substitution event targeting this player. If none exists and
+they started, defaults to 90 (the match's last recorded minute is used as
+a proxy for full-time to handle extra time naturally).
 """
 
 import math
@@ -62,21 +69,11 @@ def _build_xa_map(events: pd.DataFrame) -> dict[int, float]:
     """
     Build {pass_event_index -> xa} using the direct StatsBomb link:
         pass.assisted_shot_id  ->  shot event uuid  ->  shot.statsbomb_xg
-
-    This is a two-step vectorised lookup with no related_events traversal
-    and no heuristic fallbacks.
-
-    Fallback for older spec rows where goal_assist=True but assisted_shot_id
-    is absent: use the mean xG of all shots in the match (not 1.0), since we
-    know a goal occurred but cannot identify the exact shot.
     """
     type_col = events["type"].map(
         lambda t: t.get("name") if isinstance(t, dict) else (t or "")
     )
 
-    # ------------------------------------------------------------------
-    # Step 1: {shot_uuid -> xg} — vectorised, no iterrows
-    # ------------------------------------------------------------------
     is_shot = type_col == "Shot"
     shot_xg_dict: dict[str, float] = {}
 
@@ -90,9 +87,6 @@ def _build_xa_map(events: pd.DataFrame) -> dict[int, float]:
 
     mean_shot_xg: float = float(np.mean(list(shot_xg_dict.values()))) if shot_xg_dict else 0.0
 
-    # ------------------------------------------------------------------
-    # Step 2: {pass_index -> xa} via pass.assisted_shot_id
-    # ------------------------------------------------------------------
     is_pass = type_col == "Pass"
     xa_map: dict[int, float] = {}
 
@@ -101,21 +95,15 @@ def _build_xa_map(events: pd.DataFrame) -> dict[int, float]:
 
     pass_rows = events.loc[is_pass]
 
-    # Extract assisted_shot_id from each pass dict (None when absent)
     assisted_shot_ids = pass_rows["pass"].map(
         lambda p: p.get("assisted_shot_id") if isinstance(p, dict) else None
     )
 
-    # Direct lookup: pass index -> xg of the linked shot
     for idx, shot_uuid in assisted_shot_ids.dropna().items():
         xg = shot_xg_dict.get(shot_uuid)
         if xg is not None:
             xa_map[idx] = xg
 
-    # ------------------------------------------------------------------
-    # Fallback: goal_assist=True with no assisted_shot_id (older spec)
-    # Use mean match xG — not 1.0 — to avoid systematic overestimation.
-    # ------------------------------------------------------------------
     goal_assist_flags = pass_rows["pass"].map(
         lambda p: bool(p.get("goal_assist")) if isinstance(p, dict) else False
     )
@@ -124,6 +112,29 @@ def _build_xa_map(events: pd.DataFrame) -> dict[int, float]:
             xa_map[idx] = mean_shot_xg
 
     return xa_map
+
+
+def _build_subbed_off_set(events: pd.DataFrame) -> set[int]:
+    """
+    Return a set of player ids who were substituted OFF in this match.
+
+    StatsBomb substitution events have type.name == "Substitution" and
+    carry a substitution.replacement dict with the incoming player's id.
+    The event itself is attributed to the player coming OFF (event.player.id).
+    """
+    type_col = events["type"].map(
+        lambda t: t.get("name") if isinstance(t, dict) else (t or "")
+    )
+    is_sub = type_col == "Substitution"
+    if not is_sub.any():
+        return set()
+
+    subbed_off: set[int] = set()
+    for _, row in events.loc[is_sub].iterrows():
+        p = row.get("player")
+        if isinstance(p, dict) and isinstance(p.get("id"), int):
+            subbed_off.add(p["id"])
+    return subbed_off
 
 
 def agg_match_by_player(
@@ -137,16 +148,26 @@ def agg_match_by_player(
     ev = ev.dropna(subset=["_player_id"])
     ev["_player_id"] = ev["_player_id"].astype(int)
 
-    # Build xa map once per match across all events (shots and passes both needed)
-    xa_map = _build_xa_map(events)
+    xa_map      = _build_xa_map(events)
+    subbed_off  = _build_subbed_off_set(events)
+
+    # The last minute in the match is a reliable proxy for full-time
+    # (including extra time) without needing a separate metadata field.
+    match_last_minute = int(events["minute"].max()) if "minute" in events.columns and len(events) else 90
 
     result: dict[int, dict] = {}
     for pid, pe in ev.groupby("_player_id", sort=False):
-        result[pid] = _agg_player_slice(pe, pid, xa_map)
+        result[pid] = _agg_player_slice(pe, pid, xa_map, subbed_off, match_last_minute)
     return result
 
 
-def _agg_player_slice(pe: pd.DataFrame, pid: int, xa_map: dict) -> dict:
+def _agg_player_slice(
+    pe: pd.DataFrame,
+    pid: int,
+    xa_map: dict,
+    subbed_off: set[int],
+    match_last_minute: int,
+) -> dict:
     types = pe["_type"]
 
     is_shot         = types == "Shot"
@@ -186,7 +207,6 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int, xa_map: dict) -> dict:
             lambda p: bool(p.get("shot_assist") or p.get("goal_assist"))
         ).sum())
 
-        # xa: sum xa_map values for this player's pass event indices only
         xa = float(sum(xa_map.get(idx, 0.0) for idx in pe.loc[is_pass].index))
 
         start_locs = pe.loc[is_pass, "location"]
@@ -249,15 +269,26 @@ def _agg_player_slice(pe: pd.DataFrame, pid: int, xa_map: dict) -> dict:
         yellow_cards = int(card_names.isin({"Yellow Card", "Second Yellow"}).sum())
         red_cards    = int((card_names == "Red Card").sum())
 
-    # Sub + minutes
+    # Sub minute: the minute this player came OFF (if substituted).
     sub_minute = None
     if is_sub.sum():
         sub_mins = pe.loc[is_sub, "minute"]
         if len(sub_mins):
             sub_minute = int(sub_mins.iloc[0])
 
-    last_minute    = int(pe["minute"].max()) if len(pe) and "minute" in pe.columns else 0
-    minutes_played = sub_minute if sub_minute is not None else last_minute
+    # Minutes played:
+    # - If substituted off: use the sub minute.
+    # - If never subbed off: use match_last_minute (the final minute of the
+    #   match), not the player's last event minute. A player who started but
+    #   had no involvement after minute 72 was still on the pitch at 90.
+    if sub_minute is not None:
+        minutes_played = sub_minute
+    elif pid in subbed_off:
+        # Subbed off but sub event attributed to this player — sub_minute
+        # should have been set above; fall back to last event minute.
+        minutes_played = int(pe["minute"].max()) if len(pe) and "minute" in pe.columns else 0
+    else:
+        minutes_played = match_last_minute
 
     return {
         "goals":               int(goals),
@@ -310,30 +341,12 @@ def _resolve_name(val) -> str:
     if isinstance(val, dict):
         return val.get("name", "")
     return val or ""
+
+
 def extract_starting_positions(lineups_df: pd.DataFrame) -> dict[int, str]:
     """
     Parse a StatsBomb lineups DataFrame and return
     {sb_player_id -> dominant_position_name}.
-
-    The real lineup schema is:
-        lineup: list of player dicts, each with:
-            player_id: int
-            positions: list of position-interval dicts:
-                {
-                  "position_id": int,
-                  "position": str,          <-- the name we want
-                  "from": "MM:SS",
-                  "to": "MM:SS" | null,
-                  "from_period": int,
-                  "to_period": int | null,
-                  "start_reason": str,      <-- "Starting XI" | "Tactical Shift" | ...
-                  "end_reason": str | null
-                }
-
-    Dominant position = the position interval with start_reason "Starting XI".
-    If a player has multiple intervals (e.g. tactical shift after kick-off),
-    we still take the Starting XI one because that reflects their pre-match role.
-    If no "Starting XI" interval exists (substitute), we take the first interval.
     """
     pos_map: dict[int, str] = {}
 
@@ -354,7 +367,6 @@ def extract_starting_positions(lineups_df: pd.DataFrame) -> dict[int, str]:
             if not isinstance(positions, list) or len(positions) == 0:
                 continue
 
-            # Priority 1: interval where start_reason == "Starting XI"
             starting = [
                 p for p in positions
                 if isinstance(p, dict)
@@ -362,11 +374,9 @@ def extract_starting_positions(lineups_df: pd.DataFrame) -> dict[int, str]:
             ]
 
             if starting:
-                # If somehow multiple (rare), take the one from period 1
                 starting.sort(key=lambda p: p.get("from_period") or 99)
                 chosen = starting[0]
             else:
-                # Substitute — take their first recorded position interval
                 valid = [p for p in positions if isinstance(p, dict)]
                 if not valid:
                     continue
@@ -386,10 +396,6 @@ def build_minute_snapshots(
 ) -> dict[tuple[int, int], dict]:
     """
     Build cumulative per-team per-minute stats from a match events DataFrame.
-
-    Returns {(sb_team_id, minute) -> cumulative_stats_dict}.
-    We compute a row for every minute in which at least one event occurred,
-    carrying forward totals from the previous minute.
     """
     type_col   = events["type"].map(
         lambda t: t.get("name") if isinstance(t, dict) else (t or "")
@@ -398,7 +404,6 @@ def build_minute_snapshots(
         lambda t: t.get("id") if isinstance(t, dict) else None
     )
 
-    # Per-event contributions
     records = []
     for idx, row in events.iterrows():
         t_name = type_col.at[idx]
@@ -465,7 +470,6 @@ def build_minute_snapshots(
         if team_df.empty:
             continue
 
-        # Aggregate by minute
         by_min = team_df.groupby("minute").agg(
             goals=("goal", "sum"),
             xg=("xg", "sum"),
@@ -476,12 +480,10 @@ def build_minute_snapshots(
             reds=("red", "sum"),
         ).sort_index()
 
-        # Build cumulative running totals across all minutes
         cum_goals = cum_xg = cum_shots = cum_passes = cum_passes_ok = 0
         cum_pressures = cum_reds = 0
 
-        all_minutes = sorted(by_min.index.tolist())
-        for m in all_minutes:
+        for m in sorted(by_min.index.tolist()):
             row_m = by_min.loc[m]
             cum_goals      += int(row_m["goals"])
             cum_xg         += float(row_m["xg"])
