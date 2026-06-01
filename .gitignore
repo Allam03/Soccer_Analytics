@@ -53,9 +53,6 @@ coverage.xml
 data/
 *.csv
 *.json
-*.pkl
-*.pickle
-*.parquet
 
 # Environment files
 .env
