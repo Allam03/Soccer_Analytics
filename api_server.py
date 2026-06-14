@@ -278,9 +278,9 @@ def health() -> dict[str, Any]:
     table_counts: dict[str, Any] = {}
     if db_reachable:
         for tbl in (
-            "teams", "players", "matches", "weather",
-            "injuries", "player_match_stats", "player_match_features",
-            "pass_network_edges",
+            "teams", "players", "matches", "stadiums",
+            "player_match_stats", "shots",
+            "pass_network_edges", "match_minute_snapshots",
         ):
             table_counts[tbl] = _table_count(tbl)
     else:

@@ -41,16 +41,10 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "player_name":   "text",
             "norm_name":     "text",
             "sb_player_id":  "integer",
-            "tm_player_id":  "integer",
-            "nationality":   "text",
-            "position":      "text",
-            "date_of_birth": "date",
         },
         "stadiums": {
             "stadium_id":   "integer",
             "stadium_name": "text",
-            "stadium_lat":  "double precision",
-            "stadium_lng":  "double precision",
         },
         "matches": {
             "match_id":     "integer",
@@ -64,30 +58,11 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "season":       "text",
             "stadium_id":   "integer",
         },
-        "weather": {
-            "weather_id":       "integer",
-            "match_id":         "integer",
-            "temperature_c":    "double precision",
-            "humidity_pct":     "double precision",
-            "wind_speed_kmh":   "double precision",
-            "precipitation_mm": "double precision",
-            "weather_condition":"text",
-        },
-        "injuries": {
-            "injury_id":     "integer",
-            "player_id":     "integer",
-            "injury_type":   "text",
-            "injury_date":   "date",
-            "return_date":   "date",
-            "matches_missed":"integer",
-            "season":        "text",
-        },
         "player_match_stats": {
             "stat_id":           "integer",
             "player_id":         "integer",
             "match_id":          "integer",
             "team_id":           "integer",
-            "weather_id":        "integer",
             "result":            "text",
             "goals":             "integer",
             "assists":           "integer",
@@ -112,15 +87,29 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "starting_position":  "text",
             "sub_minute":        "integer",
         },
-        "player_match_features": {
-            "feature_id":            "integer",
-            "stat_id":               "integer",
-            "player_id":             "integer",
-            "match_id":              "integer",
-            "matches_last_30_days":  "integer",
-            "minutes_last_30_days":  "integer",
-            "days_since_last_injury":"integer",
-            "is_injured_next_30d":   "boolean",
+        "shots": {
+            "shot_id":             "integer",
+            "sb_event_id":         "text",
+            "match_id":            "integer",
+            "player_id":           "integer",
+            "team_id":             "integer",
+            "minute":              "integer",
+            "x":                   "double precision",
+            "y":                   "double precision",
+            "distance":            "double precision",
+            "angle":               "double precision",
+            "body_part":           "text",
+            "shot_type":           "text",
+            "technique":           "text",
+            "play_pattern":        "text",
+            "under_pressure":      "boolean",
+            "first_time":          "boolean",
+            "defenders_in_cone":   "integer",
+            "dist_to_nearest_def": "double precision",
+            "gk_dist_to_goal":     "double precision",
+            "gk_dist_to_shot":     "double precision",
+            "statsbomb_xg":        "double precision",
+            "is_goal":             "boolean",
         },
         "match_minute_snapshots": {
             "snapshot_id":       "integer",
@@ -149,25 +138,24 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
         },
     }
 
-    # Columns that were removed and should no longer exist anywhere.
+    # Columns / tables that were removed and should no longer exist anywhere.
     stale = {
         "teams":              {"country"},
         "matches":            {"stadium_name", "stadium_lat", "stadium_lng"},
-        "player_match_stats": {
-            "days_since_last_injury",
-            "matches_last_30_days",
-            "minutes_last_30_days",
-            "is_injured_next_30d",
-        },
+        "players":            {"tm_player_id", "nationality", "position", "date_of_birth"},
+        "stadiums":           {"stadium_lat", "stadium_lng"},
+        "player_match_stats": {"weather_id"},
     }
+
+    # Tables that were removed entirely (StatsBomb-only platform).
+    stale_tables = {"weather", "injuries", "player_match_features"}
 
     # UNIQUE constraints: table -> minimum expected count.
     unique_constraints = {
         "player_match_stats":    1,   # (player_id, match_id)
-        "player_match_features": 2,   # (stat_id) + (player_id, match_id)
-        "injuries":              1,   # (player_id, injury_date, injury_type)
         "pass_network_edges":    1,   # (match_id, team_id, passer_id, receiver_id)
         "match_minute_snapshots": 1,
+        "shots":                 1,   # (sb_event_id)
     }
 
     try:
@@ -208,6 +196,15 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                 for col in cols & present:
                     warnings.append(f"{table}.{col} should have been dropped")
 
+            # Removed tables that should no longer exist.
+            for table in stale_tables:
+                cur.execute("""
+                    SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = %s
+                """, (table,))
+                if cur.fetchone()[0]:
+                    warnings.append(f"table '{table}' should have been dropped")
+
             # ------------------------------------------------------------------
             # 3. UNIQUE constraints
             # ------------------------------------------------------------------
@@ -225,38 +222,16 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                     )
 
             # ------------------------------------------------------------------
-            # 4. CHECK constraint on weather.weather_condition
-            # Uses pg_constraint to avoid information_schema join issues.
-            # ------------------------------------------------------------------
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM pg_constraint c
-                JOIN pg_class t ON t.oid = c.conrelid
-                JOIN pg_attribute a ON a.attrelid = t.oid
-                    AND a.attnum = ANY(c.conkey)
-                WHERE t.relname  = 'weather'
-                  AND a.attname  = 'weather_condition'
-                  AND c.contype  = 'c'
-            """)
-            if cur.fetchone()[0] == 0:
-                warnings.append(
-                    "weather.weather_condition has no CHECK constraint"
-                )
-
-            # ------------------------------------------------------------------
-            # 5. Referential integrity (orphan row counts)
+            # 4. Referential integrity (orphan row counts)
             # ------------------------------------------------------------------
             orphan_checks = [
                 ("player_match_stats",    "player_id", "players",            "player_id"),
                 ("player_match_stats",    "match_id",  "matches",            "match_id"),
                 ("player_match_stats",    "team_id",   "teams",              "team_id"),
-                ("player_match_features", "stat_id",   "player_match_stats", "stat_id"),
-                ("player_match_features", "player_id", "players",            "player_id"),
-                ("player_match_features", "match_id",  "matches",            "match_id"),
-                ("injuries",              "player_id", "players",            "player_id"),
                 ("matches",               "stadium_id","stadiums",           "stadium_id"),
-                ("weather",               "match_id",  "matches",            "match_id"),
                 ("pass_network_edges",    "match_id",  "matches",            "match_id"),
+                ("shots",                 "match_id",  "matches",            "match_id"),
+                ("shots",                 "player_id", "players",            "player_id"),
             ]
             for fk_table, fk_col, ref_table, ref_col in orphan_checks:
                 cur.execute(f"""

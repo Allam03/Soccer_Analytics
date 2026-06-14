@@ -33,8 +33,8 @@ def verify(conn):
         tables = [r[0] for r in cur.fetchall()]
     logger.info("Tables: %s", tables)
     missing = {
-        "injuries", "matches", "pass_network_edges",
-        "player_match_stats", "players", "teams", "weather",
+        "matches", "pass_network_edges", "match_minute_snapshots",
+        "player_match_stats", "players", "teams", "stadiums", "shots",
     } - set(tables)
     if missing:
         logger.error("Missing tables: %s", missing)
