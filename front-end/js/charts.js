@@ -330,4 +330,55 @@ const Charts = {
       },
     });
   },
+
+  // ── Goals vs xG (grouped bars) ────────────────────────────────────────────
+  initXGChart(players) {
+    const canvas = document.getElementById('xgChart');
+    if (!canvas || !players || !players.length) return;
+    destroyChart(canvas);
+
+    const labels = players.map(p => p.player_name.split(' ').slice(-1)[0]);
+    new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label:           'Goals',
+            data:            players.map(p => p.goals || 0),
+            backgroundColor: C.accent,
+            borderRadius:    3,
+            borderSkipped:   false,
+          },
+          {
+            label:           'xG',
+            data:            players.map(p => Number(p.xg || 0)),
+            backgroundColor: C.cyan,
+            borderRadius:    3,
+            borderSkipped:   false,
+          },
+        ],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              usePointStyle: true,
+              color:         '#8896aa',
+              font:          { size: 11, family: "'IBM Plex Mono', monospace" },
+              padding:       16,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(2)}` },
+          },
+        },
+        scales: makeScales({ x: { grid: { display: false } } }),
+      },
+    });
+  },
 };

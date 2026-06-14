@@ -15,13 +15,12 @@
    ============================================================ */
 
 const AppState = {
-  teams:       [],
-  dashboard:   null,
-  player:      null,
-  cohesion:    null,
-  injury:      null,
-  environment: null,
-  winprob:     null,
+  teams:     [],
+  dashboard: null,
+  player:    null,
+  cohesion:  null,
+  xg:        null,
+  winprob:   null,
 };
 
 const _pendingRender = new Set();
@@ -110,7 +109,7 @@ async function refreshAllData() {
 
   document.querySelectorAll(".kpi-value").forEach((el) => el.classList.add("shimmer"));
 
-  ["dashboard", "player", "cohesion", "injury", "env", "winprob"].forEach(
+  ["dashboard", "player", "cohesion", "xg", "winprob"].forEach(
     (p) => _pendingRender.add(p)
   );
 
@@ -118,14 +117,13 @@ async function refreshAllData() {
     ApiService.loadDashboard(),
     ApiService.loadPlayer(),
     ApiService.loadCohesion(),
-    ApiService.loadInjury(),
-    ApiService.loadEnvironment(),
+    ApiService.loadXG(),
     ApiService.loadWinProb(),
   ]);
 
-  const [dashRes, playerRes, cohesionRes, injuryRes, envRes, winprobRes] = results;
+  const [dashRes, playerRes, cohesionRes, xgRes, winprobRes] = results;
 
-  const labels = ["dashboard", "player", "cohesion", "injury", "environment", "winprob"];
+  const labels = ["dashboard", "player", "cohesion", "xg", "winprob"];
   results.forEach((r, i) => {
     if (r.status === "rejected") {
       console.error(`[refreshAllData] ${labels[i]} fetch failed:`, r.reason);
@@ -134,22 +132,20 @@ async function refreshAllData() {
     }
   });
 
-  AppState.dashboard   = dashRes.status   === "fulfilled" ? dashRes.value   : null;
-  AppState.player      = playerRes.status === "fulfilled" ? playerRes.value : null;
-  AppState.cohesion    = cohesionRes.status === "fulfilled" ? cohesionRes.value : null;
-  AppState.injury      = injuryRes.status === "fulfilled" ? injuryRes.value : null;
-  AppState.environment = envRes.status    === "fulfilled" ? envRes.value    : null;
-  AppState.winprob     = winprobRes.status === "fulfilled" ? winprobRes.value : null;
+  AppState.dashboard = dashRes.status     === "fulfilled" ? dashRes.value     : null;
+  AppState.player    = playerRes.status   === "fulfilled" ? playerRes.value   : null;
+  AppState.cohesion  = cohesionRes.status === "fulfilled" ? cohesionRes.value : null;
+  AppState.xg        = xgRes.status       === "fulfilled" ? xgRes.value       : null;
+  AppState.winprob   = winprobRes.status  === "fulfilled" ? winprobRes.value  : null;
 
   const activePage = document.querySelector(".page.active")?.id?.replace("page-", "") || "dashboard";
   debug("Active page is:", activePage);
   renderPage(activePage);
 
-  // Squad cards depend on both dashboard (for the grid container) and injury
-  // data (for risk scores). Render them here, after both have settled, rather
-  // than inside renderDashboard() where injury data may not yet be available.
+  // Finishing-leader cards on the dashboard depend on the xG data, which may
+  // settle after the dashboard payload. Render them here once both are in.
   if (activePage === "dashboard") {
-    renderSquadStatusCards();
+    renderFinishingLeaders();
   }
 
   const sources = results
@@ -178,11 +174,10 @@ function onPageActivated(pageId) {
   debug("onPageActivated:", pageId);
   if (_pendingRender.has(pageId)) {
     renderPage(pageId);
-    // Squad cards are tied to the dashboard page and need injury data.
-    // Render them here on navigation too, in case this is a lazy first visit
-    // after all data has already loaded.
+    // Finishing-leader cards live on the dashboard and need the xG payload.
+    // Render them here on a lazy first visit too.
     if (pageId === "dashboard") {
-      renderSquadStatusCards();
+      renderFinishingLeaders();
     }
   }
 }
@@ -190,12 +185,11 @@ function onPageActivated(pageId) {
 function renderPage(pageId) {
   _pendingRender.delete(pageId);
   switch (pageId) {
-    case "dashboard": _safeRender(renderDashboard,     "dashboard");  break;
-    case "player":    _safeRender(renderPlayer,        "player");     break;
-    case "cohesion":  _safeRender(renderCohesion,      "cohesion");   break;
-    case "injury":    _safeRender(renderInjury,        "injury");     break;
-    case "env":       _safeRender(renderEnvironment,   "env");        break;
-    case "winprob":   _safeRender(renderWinProb,       "winprob");    break;
+    case "dashboard": _safeRender(renderDashboard, "dashboard"); break;
+    case "player":    _safeRender(renderPlayer,    "player");    break;
+    case "cohesion":  _safeRender(renderCohesion,  "cohesion");  break;
+    case "xg":        _safeRender(renderXG,        "xg");        break;
+    case "winprob":   _safeRender(renderWinProb,   "winprob");   break;
     default: debug("Unknown pageId:", pageId);
   }
 }
@@ -224,17 +218,18 @@ function renderDashboard() {
   const values = document.querySelectorAll("#page-dashboard .kpi-value");
   if (values[0]) values[0].textContent = kpi.team_performance.toFixed(1);
   if (values[1]) values[1].textContent = kpi.cohesion_index.toFixed(2);
-  if (values[2]) values[2].textContent = String(kpi.high_risk_players);
+  if (values[2]) {
+    const d = Number(kpi.finishing_diff || 0);
+    values[2].textContent = `${d >= 0 ? "+" : ""}${d.toFixed(1)}`;
+  }
   if (values[3]) values[3].textContent = `${kpi.next_match_win_pct.toFixed(1)}%`;
 
   requestAnimationFrame(() => {
     Charts.initPerfTrend(AppState.dashboard.performance_trend);
   });
 
-  // Squad status cards are intentionally NOT rendered here.
-  // They are rendered in refreshAllData() and onPageActivated() after both
-  // dashboard and injury data have resolved, preventing a silent empty grid
-  // when injury data arrives after dashboard data.
+  // Finishing-leader cards are rendered in refreshAllData()/onPageActivated()
+  // once the xG payload has resolved (it may arrive after the dashboard data).
 
   animateCards();
   animateProgressBars();
@@ -451,75 +446,52 @@ function _renderCohesionCards(edges) {
 }
 
 // ---------------------------------------------------------------------------
-// renderInjury
+// renderXG  (Shot Quality — from-scratch Expected Goals)
 // ---------------------------------------------------------------------------
 
-function renderInjury() {
-  const data = AppState.injury;
+function renderXG() {
+  const data = AppState.xg;
   if (!data) {
-    showPageError("injury", "Injury risk data unavailable");
+    showPageError("xg", "xG data unavailable");
     return;
   }
-  debug("renderInjury(), source=", data.source, "players=", data.players?.length);
+  debug("renderXG(), source=", data.source, "players=", data.players?.length);
 
-  const kpi    = data.kpi || {};
-  const values = document.querySelectorAll("#page-injury .kpi-value");
-  if (values[0]) values[0].textContent = String(kpi.high   || 0);
-  if (values[1]) values[1].textContent = String(kpi.medium || 0);
-  if (values[2]) values[2].textContent = String(kpi.low    || 0);
-  if (values[3]) values[3].textContent = (kpi.avg_score || 0).toFixed(2);
+  const kpi     = data.kpi || {};
+  const players = data.players || [];
 
-  renderInjuryRiskTable();
+  const values = document.querySelectorAll("#page-xg .kpi-value");
+  if (values[0]) values[0].textContent = Number(kpi.team_xg || 0).toFixed(1);
+  if (values[1]) values[1].textContent = String(kpi.team_goals || 0);
+  if (values[2]) {
+    const d = Number(kpi.xg_diff || 0);
+    values[2].textContent = `${d >= 0 ? "+" : ""}${d.toFixed(1)}`;
+  }
+  if (values[3]) values[3].textContent = String(kpi.shots || 0);
+
   requestAnimationFrame(() => {
-    Charts.initInjuryHistory(data.players || []);
+    Charts.initXGChart(players.slice(0, 10));
   });
-}
 
-// ---------------------------------------------------------------------------
-// renderEnvironment
-// ---------------------------------------------------------------------------
-
-function renderEnvironment() {
-  const data = AppState.environment;
-  if (!data) {
-    showPageError("env", "Environmental impact data unavailable");
-    return;
-  }
-  debug("renderEnvironment(), source=", data.source, "points=", data.scatter?.length);
-
-  if (data.scatter && data.scatter.length) {
-    requestAnimationFrame(() => {
-      Charts.initTempPerf(data.scatter);
-    });
-  }
-  const summary = data.condition_summary || {};
-  if (Object.keys(summary).length) {
-    _renderConditionSummary(summary);
-  }
-}
-
-function _renderConditionSummary(summary) {
-  const condItems = document.querySelectorAll("#page-env .condition-item");
-  const COND_ICONS = {
-    clear: "☀️", rain: "🌧️", heavy_rain: "⛈️", windy: "💨", cold: "❄️", hot: "🔥",
-  };
-  let i = 0;
-  for (const [cond, stats] of Object.entries(summary)) {
-    if (i >= condItems.length) break;
-    const item    = condItems[i];
-    const nameEl  = item.querySelector(".condition-name");
-    const scoreEl = item.querySelector(".condition-score");
-    const deltaEl = item.querySelector(".condition-delta");
-    const iconEl  = item.querySelector("span[style]");
-    if (iconEl)   iconEl.textContent  = COND_ICONS[cond] || "🌤️";
-    if (nameEl)   nameEl.textContent  = _capitalize(cond.replace("_", " "));
-    if (scoreEl)  scoreEl.textContent = stats.predicted_xg?.toFixed(2) || "-";
-    if (deltaEl) {
-      const acc = stats.predicted_pass_acc || 0;
-      deltaEl.textContent = `${acc.toFixed(1)}% pass acc`;
-      deltaEl.className   = `condition-delta ${acc >= 70 ? "pos" : "neg"}`;
+  const tbody = document.querySelector("#page-xg table tbody");
+  if (tbody) {
+    if (!players.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="text-muted text-center">No shot data</td></tr>';
+    } else {
+      tbody.innerHTML = players.map((p) => {
+        const d = Number(p.xg_diff || 0);
+        const color = d >= 0 ? "var(--accent)" : "var(--red)";
+        return `
+          <tr>
+            <td class="fw-700">${p.player_name}</td>
+            <td>${p.position || "-"}</td>
+            <td>${p.shots || 0}</td>
+            <td>${p.goals || 0}</td>
+            <td>${Number(p.xg || 0).toFixed(2)}</td>
+            <td style="color:${color};font-weight:600">${d >= 0 ? "+" : ""}${d.toFixed(2)}</td>
+          </tr>`;
+      }).join("");
     }
-    i++;
   }
 }
 
@@ -556,77 +528,36 @@ function renderWinProb() {
 }
 
 // ---------------------------------------------------------------------------
-// Squad status cards (dashboard)
+// Finishing leaders (dashboard) — Goals vs xG from the xG model
 // ---------------------------------------------------------------------------
 
-function renderSquadStatusCards() {
+function renderFinishingLeaders() {
   const grid    = document.querySelector("#page-dashboard .squad-grid");
-  const players = AppState.injury?.players;
+  const players = AppState.xg?.players;
   if (!grid) {
-    debug("renderSquadStatusCards: .squad-grid not found");
+    debug("renderFinishingLeaders: .squad-grid not found");
     return;
   }
   if (!players?.length) {
-    debug("renderSquadStatusCards: no player data yet");
+    debug("renderFinishingLeaders: no xG data yet");
     return;
   }
 
+  // Highest over-performers (Goals - xG) first.
   const top = [...players]
-    .sort((a, b) => Number(b.risk_score) - Number(a.risk_score))
+    .sort((a, b) => Number(b.xg_diff) - Number(a.xg_diff))
     .slice(0, 10);
 
   grid.innerHTML = top.map((p) => {
-    const score = Number(p.risk_score || 0);
-    const meta  = getRiskMeta(score);
+    const d = Number(p.xg_diff || 0);
+    const cls = d >= 0 ? "risk-ok" : "risk-high";
+    const badgeClass = d >= 0 ? "badge-low" : "badge-high";
     return `
-      <div class="squad-card ${meta.cardClass}">
+      <div class="squad-card ${cls}">
         <div class="squad-name">${p.player_name}</div>
-        <div class="squad-pos">${p.position || "-"}</div>
-        <span class="badge ${meta.badgeClass}">${meta.label}</span>
+        <div class="squad-pos">${p.goals || 0}G / ${Number(p.xg || 0).toFixed(1)} xG</div>
+        <span class="badge ${badgeClass}">${d >= 0 ? "+" : ""}${d.toFixed(1)}</span>
       </div>
-    `;
-  }).join("");
-}
-
-// ---------------------------------------------------------------------------
-// Injury risk table
-// ---------------------------------------------------------------------------
-
-function renderInjuryRiskTable() {
-  const tbody   = document.querySelector("#page-injury .data-table tbody");
-  const players = AppState.injury?.players;
-  if (!tbody) {
-    debug("renderInjuryRiskTable: tbody not found");
-    return;
-  }
-  if (!players?.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No data</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML = players.map((p) => {
-    const score = Number(p.risk_score || 0);
-    const pct   = Math.round(score * 100);
-    const meta  = getRiskMeta(score);
-    const barColor       = score >= 0.67 ? "var(--red)" : score >= 0.4 ? "var(--amber)" : "var(--accent)";
-    const recommendation = score >= 0.67 ? "Rest advised" : score >= 0.4 ? "Reduce load" : "Proceed normally";
-    return `
-      <tr>
-        <td class="fw-700">${p.player_name}</td>
-        <td>${p.position || "-"}</td>
-        <td>
-          <div class="risk-score-bar">
-            <div class="risk-bar">
-              <div class="risk-bar-fill" style="width:${pct}%;background:${barColor}"></div>
-            </div>
-            <span class="fs-12" style="width:30px">${score.toFixed(2)}</span>
-          </div>
-        </td>
-        <td><span class="badge ${meta.badgeClass}">${meta.label.replace(" Risk", "")}</span></td>
-        <td>${Number(p.workload_30d || 0)} min</td>
-        <td>${Number(p.days_since_last_injury || 0)} days ago</td>
-        <td class="text-muted fs-12">${recommendation}</td>
-      </tr>
     `;
   }).join("");
 }

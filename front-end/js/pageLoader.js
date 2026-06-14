@@ -12,8 +12,7 @@ const PAGES = [
   { id: "dashboard-content", file: "/static/pages/dashboard.html" },
   { id: "player-content",    file: "/static/pages/player.html"    },
   { id: "cohesion-content",  file: "/static/pages/cohesion.html"  },
-  { id: "injury-content",    file: "/static/pages/injury.html"    },
-  { id: "env-content",       file: "/static/pages/env.html"       },
+  { id: "xg-content",        file: "/static/pages/xg.html"        },
   { id: "winprob-content",   file: "/static/pages/winprob.html"   },
   { id: "debug-content",     file: "/static/pages/debug.html"     },
 ];

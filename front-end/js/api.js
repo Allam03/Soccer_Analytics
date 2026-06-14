@@ -70,12 +70,8 @@ const ApiService = {
     return this.request(`/team-cohesion?team_id=${this.teamId}`);
   },
 
-  async loadInjury() {
-    return this.request(`/injury-risk?team_id=${this.teamId}`);
-  },
-
-  async loadEnvironment() {
-    return this.request(`/environment-impact?team_id=${this.teamId}`);
+  async loadXG() {
+    return this.request(`/xg-finishing?team_id=${this.teamId}`);
   },
 
   async loadWinProb() {

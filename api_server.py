@@ -126,14 +126,6 @@ def _load_all_artifacts() -> None:
         "scaler":  _load(a / "model2" / "scaler.pkl"),
         "feat_df": _parquet(a / "model2" / "graph_features.parquet"),
     }
-    _A["m3"] = {
-        "xgb":    _load(a / "model3" / "xgb.pkl"),
-        "rf":     _load(a / "model3" / "rf.pkl"),
-        "scaler": _load(a / "model3" / "scaler.pkl"),
-        "df":     _parquet(a / "model3" / "features.parquet"),
-    }
-    _A["m4"] = {t: _load(a / "model4" / f"gbr_{t}.pkl")
-                for t in ("xg", "pass_accuracy", "pressures")}
     _A["m5"] = {
         "gbc_pre":    _load(a / "model5" / "gbc_pre.pkl"),
         "scaler_pre": _load(a / "model5" / "scaler_pre.pkl"),
@@ -141,9 +133,13 @@ def _load_all_artifacts() -> None:
         "scaler_ig":  _load(a / "model5" / "scaler_ingame.pkl"),
         "df_pre":     _parquet(a / "model5" / "features_pre.parquet"),
     }
+    _A["mxg"] = {
+        "shots": _parquet(a / "model_xg" / "shots_xg.parquet"),
+        "model": _load(a / "model_xg" / "xg_model.pkl"),
+    }
     loaded = sum(1 for m in _A.values() for v in m.values() if v is not None)
     total  = sum(len(m) for m in _A.values())
-    logger.info("Artifacts: %d / %d objects loaded across 5 models", loaded, total)
+    logger.info("Artifacts: %d / %d objects loaded", loaded, total)
     if loaded == 0:
         logger.warning(
             "No artifacts loaded — all endpoints will use DB or fallback data. "
@@ -435,7 +431,7 @@ def dashboard(team_id: int) -> dict[str, Any]:
         kpi_rows = []
         db_available = False
 
-    high_risk = _m3_high_risk_count(team_id)
+    finishing = _xg_team_diff(team_id)   # team goals - xG (None if no xG data)
     win_pct   = _m5_win_pct_direct(team_id)
 
     if db_available:
@@ -445,7 +441,7 @@ def dashboard(team_id: int) -> dict[str, Any]:
             "kpi": {
                 "team_performance":   round(float(kpi["team_performance"] or 0), 1),
                 "cohesion_index":     round(float(kpi["cohesion_index"] or 0), 2),
-                "high_risk_players":  high_risk,
+                "finishing_diff":     finishing if finishing is not None else 0.0,
                 "next_match_win_pct": win_pct,
             },
             "performance_trend": {
@@ -468,7 +464,7 @@ def dashboard(team_id: int) -> dict[str, Any]:
         "kpi": {
             "team_performance":   round(sum(values) / len(values), 1),
             "cohesion_index":     0.78 + (offset * 0.01),
-            "high_risk_players":  high_risk,
+            "finishing_diff":     finishing if finishing is not None else 0.0,
             "next_match_win_pct": win_pct,
         },
         "performance_trend": {
@@ -619,6 +615,11 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
         "mean_pagerank", "max_pagerank",
         "n_nodes", "n_edges", "total_passes", "pass_per_edge",
     ]
+    # Context features appended by model2 (team xG/xGA, home, opponent quality).
+    # Must match models.model2_team_cohesion.MODEL_FEATURES order so the
+    # persisted scaler/gbr receive the correct feature vector.
+    CONTEXT_FEATURES = ["team_xg", "team_xga", "is_home", "opponent_quality"]
+    MODEL_FEATURES = GRAPH_FEATURES + CONTEXT_FEATURES
 
     kpi_from_artifact = None
     predicted_goals   = None
@@ -633,8 +634,11 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
                 "avg_degree":       round(float(avg.get("n_nodes", 0)), 1),
                 "clustering_coeff": round(float(avg.get("clustering_coefficient", 0)), 2),
             }
-            if gbr is not None and scaler is not None:
-                X = scaler.transform(avg.values.reshape(1, -1))
+            # Prediction uses the full feature vector the model was trained on.
+            have_ctx = all(c in team_feats.columns for c in CONTEXT_FEATURES)
+            if gbr is not None and scaler is not None and have_ctx:
+                full_avg = team_feats[MODEL_FEATURES].fillna(0).mean()
+                X = scaler.transform(full_avg.values.reshape(1, -1))
                 predicted_goals = round(float(gbr.predict(X)[0]), 2)
 
     try:
@@ -696,284 +700,86 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 
 
 # =============================================================================
-# /api/injury-risk
+# /api/xg-finishing  (Model: from-scratch xG)
 # =============================================================================
 
-@app.get("/api/injury-risk")
-def injury_risk(team_id: int) -> dict[str, Any]:
+def _xg_team_diff(team_id: int):
+    """Team goals minus expected goals (finishing). None if no xG data."""
+    shots = _A.get("mxg", {}).get("shots")
+    if shots is None or "team_id" not in shots.columns:
+        return None
+    ts = shots[shots["team_id"] == team_id]
+    if ts.empty:
+        return None
+    return round(float(ts["is_goal"].sum()) - float(ts["xg_pred"].sum()), 1)
+
+
+@app.get("/api/xg-finishing")
+def xg_finishing(team_id: int) -> dict[str, Any]:
     _validate_team_id(team_id)
 
-    m3      = _A.get("m3", {})
-    model   = m3.get("xgb") or m3.get("rf")
-    scaler  = m3.get("scaler")
-    feat_df = m3.get("df")
+    shots = _A.get("mxg", {}).get("shots")
+    if shots is None or "team_id" not in shots.columns:
+        logger.warning("/api/xg-finishing: xG artifact unavailable")
+        return {"players": [], "kpi": {}, "source": "fallback"}
 
-    FEATURES = [
-        "minutes_played", "matches_last_30_days", "minutes_last_30_days",
-        "days_since_last_injury", "age_at_match", "sub_minute_flag",
-        "xg", "xa", "pressures", "tackles", "carry_distance",
-        "interceptions", "clearances",
-    ]
+    ts = shots[shots["team_id"] == team_id]
+    if ts.empty:
+        return {"players": [], "kpi": {}, "source": "artifact"}
 
-    players_out = []
+    team_xg    = float(ts["xg_pred"].sum())
+    team_goals = int(ts["is_goal"].sum())
+    n_shots    = int(len(ts))
 
-    # Single declaration shared by both the model path and heuristic path.
-    seen: set[str] = set()
+    grp = ts.groupby("player_id").agg(
+        shots=("is_goal", "size"),
+        goals=("is_goal", "sum"),
+        xg=("xg_pred", "sum"),
+    ).reset_index()
 
+    name_map: dict[int, tuple] = {}
+    source = "artifact"
     try:
-        rows = _query(
-            """
-            SELECT p.player_name,
-                   COALESCE(p.position, '-') AS position,
-                   pms.minutes_played,
-                   COALESCE(pmf.matches_last_30_days,    0)   AS matches_last_30_days,
-                   COALESCE(pmf.minutes_last_30_days,    0)   AS minutes_last_30_days,
-                   COALESCE(pmf.days_since_last_injury, -1)   AS days_since_last_injury,
-                   CASE WHEN pms.sub_minute IS NOT NULL THEN 1 ELSE 0 END AS sub_minute_flag,
-                   pms.xg, pms.xa, pms.pressures, pms.tackles,
-                   pms.carry_distance, pms.interceptions, pms.clearances,
-                   COALESCE(
-                       EXTRACT(YEAR FROM AGE(m.match_date, p.date_of_birth))::INT,
-                       25
-                   ) AS age_at_match
-            FROM player_match_stats pms
-            JOIN player_match_features pmf ON pmf.stat_id  = pms.stat_id
-            JOIN players p                 ON p.player_id  = pms.player_id
-            JOIN matches  m                ON m.match_id   = pms.match_id
-            WHERE pms.team_id = %s
-            ORDER BY pms.match_id DESC
-            LIMIT 15
-            """,
-            (team_id,),
-        )
-        if rows:
-            logger.info("/api/injury-risk team=%d: %d rows (primary join)", team_id, len(rows))
-    except Exception as exc:
-        logger.warning("/api/injury-risk team=%d primary query error: %s", team_id, exc)
-        _last_errors["injury_risk"] = str(exc)
-        rows = []
-
-    if not rows:
-        try:
+        ids = [int(x) for x in grp["player_id"].dropna().tolist()]
+        if ids:
             rows = _query(
-                """
-                SELECT p.player_name,
-                       COALESCE(p.position, '-') AS position,
-                       pms.minutes_played,
-                       0   AS matches_last_30_days,
-                       0   AS minutes_last_30_days,
-                       -1  AS days_since_last_injury,
-                       CASE WHEN pms.sub_minute IS NOT NULL THEN 1 ELSE 0 END AS sub_minute_flag,
-                       pms.xg, pms.xa, pms.pressures, pms.tackles,
-                       pms.carry_distance, pms.interceptions, pms.clearances,
-                       COALESCE(
-                           EXTRACT(YEAR FROM AGE(m.match_date, p.date_of_birth))::INT,
-                           25
-                       ) AS age_at_match
-                FROM player_match_stats pms
-                JOIN players p ON p.player_id = pms.player_id
-                JOIN matches  m ON m.match_id  = pms.match_id
-                WHERE pms.team_id = %s
-                ORDER BY pms.match_id DESC
-                LIMIT 15
-                """,
-                (team_id,),
+                "SELECT player_id, player_name, COALESCE(position,'-') AS position "
+                "FROM players WHERE player_id = ANY(%s)",
+                (ids,),
             )
-            if rows:
-                logger.info(
-                    "/api/injury-risk team=%d: %d rows (fallback query, no pmf join)",
-                    team_id, len(rows),
-                )
-        except Exception as exc:
-            logger.warning("/api/injury-risk team=%d fallback query error: %s", team_id, exc)
-            rows = []
-
-    if rows and model and scaler:
-        X = np.array([
-            [
-                float(r.get("minutes_played") or 0),
-                float(r.get("matches_last_30_days") or 0),
-                float(r.get("minutes_last_30_days") or 0),
-                float(r.get("days_since_last_injury")
-                      if r.get("days_since_last_injury") is not None else -1),
-                float(r.get("age_at_match") or 25),
-                float(r.get("sub_minute_flag") or 0),
-                float(r.get("xg") or 0),
-                float(r.get("xa") or 0),
-                float(r.get("pressures") or 0),
-                float(r.get("tackles") or 0),
-                float(r.get("carry_distance") or 0),
-                float(r.get("interceptions") or 0),
-                float(r.get("clearances") or 0),
-            ]
-            for r in rows
-        ])
-        X_sc  = scaler.transform(X)
-        probs = model.predict_proba(X_sc)[:, 1]
-
-        for r, prob in zip(rows, probs):
-            name = r["player_name"]
-            if name in seen:
-                continue
-            seen.add(name)
-            players_out.append({
-                "player_name":            name,
-                "position":               r.get("position") or "-",
-                "workload_30d":           int(r.get("minutes_last_30_days") or 0),
-                "days_since_last_injury": int(r.get("days_since_last_injury") or 0),
-                "risk_score":             round(float(prob), 2),
-            })
-
-        if players_out:
-            players_out.sort(key=lambda p: p["risk_score"], reverse=True)
-            return _injury_response(players_out, "database+model3")
-
-    elif rows:
-        for r in rows:
-            name = r["player_name"]
-            if name in seen:
-                continue
-            seen.add(name)
-            workload = float(r.get("minutes_played") or 0)
-            days_ago = float(
-                r.get("days_since_last_injury")
-                if r.get("days_since_last_injury") not in (None, -1)
-                else 365
-            )
-            score = min(1.0, (workload / 90) * 0.3 + max(0, 1 - days_ago / 180) * 0.7)
-            players_out.append({
-                "player_name":            name,
-                "position":               r.get("position") or "-",
-                "workload_30d":           int(workload),
-                "days_since_last_injury": int(days_ago),
-                "risk_score":             round(score, 2),
-            })
-
-        if players_out:
-            players_out.sort(key=lambda p: p["risk_score"], reverse=True)
-            return _injury_response(players_out, "database")
-
-    if feat_df is not None and model and scaler:
-        cols_present = [c for c in FEATURES if c in feat_df.columns]
-        if cols_present:
-            try:
-                X     = feat_df[FEATURES].fillna(0).values
-                X_sc  = scaler.transform(X)
-                probs = model.predict_proba(X_sc)[:, 1]
-                feat_copy = feat_df.copy()
-                feat_copy["risk_score"] = probs
-
-                if "team_id" in feat_copy.columns:
-                    feat_copy = feat_copy[feat_copy["team_id"] == team_id]
-
-                feat_copy = feat_copy.sort_values("risk_score", ascending=False).head(15)
-                players_out = [
-                    {
-                        "player_name":            str(r.get("player_name", f"Player {i}")),
-                        "position":               str(r.get("position") or "-"),
-                        "workload_30d":           int(r.get("minutes_last_30_days") or 0),
-                        "days_since_last_injury": int(r.get("days_since_last_injury") or 0),
-                        "risk_score":             round(float(r["risk_score"]), 2),
-                    }
-                    for i, (_, r) in enumerate(feat_copy.iterrows())
-                ]
-                if players_out:
-                    return _injury_response(players_out, "artifact")
-            except Exception as exc:
-                logger.warning("/api/injury-risk team=%d artifact inference error: %s", team_id, exc)
-
-    logger.warning("/api/injury-risk team=%d: using fallback", team_id)
-    return _fallback_injury_for_team(team_id)
-
-
-def _injury_response(players: list, source: str) -> dict[str, Any]:
-    high = sum(1 for p in players if p["risk_score"] >= 0.67)
-    med  = sum(1 for p in players if 0.4 <= p["risk_score"] < 0.67)
-    low  = len(players) - high - med
-    return {
-        "kpi": {
-            "high": high, "medium": med, "low": low,
-            "avg_score": round(sum(p["risk_score"] for p in players) / len(players), 2),
-        },
-        "players": players,
-        "source":  source,
-    }
-
-
-# =============================================================================
-# /api/environment-impact
-# =============================================================================
-
-@app.get("/api/environment-impact")
-def environment_impact(team_id: int) -> dict[str, Any]:
-    _validate_team_id(team_id)
-
-    gbr_xg       = _A.get("m4", {}).get("xg")
-    gbr_pass_acc = _A.get("m4", {}).get("pass_accuracy")
-
-    try:
-        points = _query(
-            """
-            SELECT w.temperature_c AS temp,
-                   w.precipitation_mm,
-                   w.wind_speed_kmh,
-                   w.humidity_pct,
-                   w.weather_condition,
-                   AVG((pms.xg * 20) + (pms.pass_accuracy * 0.5) + (pms.key_passes * 2)) AS perf,
-                   AVG(pms.xg)            AS avg_xg,
-                   AVG(pms.pass_accuracy) AS avg_pass_acc
-            FROM player_match_stats pms
-            JOIN weather w ON w.weather_id = pms.weather_id
-            WHERE pms.team_id = %s AND w.temperature_c IS NOT NULL
-            GROUP BY w.temperature_c, w.precipitation_mm,
-                     w.wind_speed_kmh, w.humidity_pct, w.weather_condition
-            ORDER BY w.temperature_c
-            """,
-            (team_id,),
-        )
-        if points:
-            logger.info("/api/environment-impact team=%d: %d weather points", team_id, len(points))
-            scatter = [{"x": round(float(p["temp"]), 1),
-                        "y": round(float(p["perf"] or 0), 1)} for p in points]
-
-            condition_summary: dict[str, Any] = {}
-            if gbr_xg is not None and gbr_pass_acc is not None:
-                for p in points:
-                    cond = p.get("weather_condition") or "clear"
-                    if cond in condition_summary:
-                        continue
-                    row = pd.DataFrame([{
-                        "temperature_c":    float(p["temp"] or 15),
-                        "precipitation_mm": float(p.get("precipitation_mm") or 0),
-                        "wind_speed_kmh":   float(p.get("wind_speed_kmh") or 0),
-                        "humidity_pct":     float(p.get("humidity_pct") or 60),
-                        "venue_type":       "home",
-                        "stadium_name":     "Other",
-                    }])
-                    pred_xg       = round(float(gbr_xg.predict(row)[0]), 3)
-                    pred_pass_acc = round(float(gbr_pass_acc.predict(row)[0]), 1)
-                    condition_summary[cond] = {
-                        "predicted_xg":       pred_xg,
-                        "predicted_pass_acc": pred_pass_acc,
-                    }
-
-            return {
-                "scatter":           scatter,
-                "condition_summary": condition_summary,
-                "source":            "database+model4" if condition_summary else "database",
-            }
+            name_map = {r["player_id"]: (r["player_name"], r["position"]) for r in rows}
+            source = "database+artifact"
     except Exception as exc:
-        logger.warning("/api/environment-impact team=%d DB error: %s", team_id, exc)
-        _last_errors["environment_impact"] = str(exc)
+        logger.warning("/api/xg-finishing name lookup error: %s", exc)
+        _last_errors["xg_finishing"] = str(exc)
 
-    logger.warning("/api/environment-impact team=%d: using fallback", team_id)
+    players = []
+    for _, r in grp.iterrows():
+        if pd.isna(r["player_id"]):
+            continue
+        pid = int(r["player_id"])
+        nm, pos = name_map.get(pid, (f"Player {pid}", "-"))
+        xg    = round(float(r["xg"]), 2)
+        goals = int(r["goals"])
+        players.append({
+            "player_name": nm,
+            "position":    pos,
+            "shots":       int(r["shots"]),
+            "goals":       goals,
+            "xg":          xg,
+            "xg_diff":     round(goals - xg, 2),
+        })
+    players.sort(key=lambda p: p["xg_diff"], reverse=True)
+
     return {
-        "scatter": [
-            {"x": 8,  "y": 76}, {"x": 12, "y": 82}, {"x": 16, "y": 88},
-            {"x": 20, "y": 90}, {"x": 24, "y": 85}, {"x": 30, "y": 78},
-        ],
-        "condition_summary": {},
-        "source": "fallback",
+        "players": players[:15],
+        "kpi": {
+            "team_xg":    round(team_xg, 1),
+            "team_goals": team_goals,
+            "xg_diff":    round(team_goals - team_xg, 1),
+            "shots":      n_shots,
+        },
+        "source": source,
     }
 
 
@@ -1124,8 +930,18 @@ def _predict_cluster(row: dict, features: list, kmeans, scaler) -> int:
     if kmeans is None or scaler is None:
         return 0
     try:
-        X    = np.array([[float(row.get(f) or 0) for f in features]])
-        X_sc = scaler.transform(X)
+        # Model 1 is trained on per-90 features. The row carries per-match
+        # averages plus total matches/minutes, so convert avg -> per-90
+        # (avg * matches / minutes * 90) to match the training representation.
+        matches = float(row.get("matches") or 0)
+        minutes = float(row.get("minutes") or 0)
+        vec = []
+        for f in features:
+            v = float(row.get(f) or 0)
+            if matches > 0 and minutes > 0:
+                v = v * matches / minutes * 90.0
+            vec.append(v)
+        X_sc = scaler.transform(np.array([vec]))
         return int(kmeans.predict(X_sc)[0])
     except Exception:
         return 0
@@ -1143,48 +959,6 @@ def _build_radar(leader: dict) -> dict:
             min(100, round(float(leader.get("shots") or 0) * 20, 1)),
         ],
     }
-
-
-def _m3_high_risk_count(team_id: int) -> int:
-    m3      = _A.get("m3", {})
-    model   = m3.get("xgb") or m3.get("rf")
-    scaler  = m3.get("scaler")
-    feat_df = m3.get("df")
-
-    if model and scaler and feat_df is not None:
-        try:
-            FEATURES = [
-                "minutes_played", "matches_last_30_days", "minutes_last_30_days",
-                "days_since_last_injury", "age_at_match", "sub_minute_flag",
-                "xg", "xa", "pressures", "tackles", "carry_distance",
-                "interceptions", "clearances",
-            ]
-            team_df = (
-                feat_df[feat_df["team_id"] == team_id]
-                if "team_id" in feat_df.columns
-                else feat_df
-            ).tail(20)
-            if not team_df.empty:
-                X    = team_df[FEATURES].fillna(0).values
-                X_sc = scaler.transform(X)
-                probs = model.predict_proba(X_sc)[:, 1]
-                return int((probs >= 0.67).sum())
-        except Exception as exc:
-            logger.warning("_m3_high_risk_count team=%d error: %s", team_id, exc)
-
-    try:
-        rows = _query(
-            """
-            SELECT COUNT(*) AS cnt
-            FROM player_match_features pmf
-            JOIN player_match_stats pms ON pms.stat_id = pmf.stat_id
-            WHERE pms.team_id = %s AND pmf.is_injured_next_30d = TRUE
-            """,
-            (team_id,),
-        )
-        return int(rows[0]["cnt"]) if rows else 2
-    except Exception:
-        return 2
 
 
 def _m5_win_pct_direct(team_id: int) -> float:
@@ -1301,30 +1075,3 @@ def _fallback_player(team_id: int) -> dict[str, Any]:
         "source":  "fallback",
     }
 
-
-def _fallback_injury_for_team(team_id: int) -> dict[str, Any]:
-    roster = {
-        1: [("Kyle Walker", "RB"), ("Ruben Dias", "CB"), ("Rodri", "CDM"), ("Phil Foden", "RW"), ("Erling Haaland", "ST")],
-        2: [("Ben White", "RB"), ("William Saliba", "CB"), ("Declan Rice", "CM"), ("Bukayo Saka", "RW"), ("Gabriel Jesus", "ST")],
-        3: [("Trent Alexander-Arnold", "RB"), ("Virgil van Dijk", "CB"), ("Dominik Szoboszlai", "CM"), ("Luis Diaz", "LW"), ("Mohamed Salah", "RW")],
-        4: [("Reece James", "RB"), ("Levi Colwill", "CB"), ("Enzo Fernandez", "CM"), ("Cole Palmer", "RW"), ("Nicolas Jackson", "ST")],
-    }.get(team_id, [("Player A", "MF"), ("Player B", "DF"), ("Player C", "FW"), ("Player D", "CB"), ("Player E", "ST")])
-
-    scores    = [0.76, 0.61, 0.49, 0.33, 0.24]
-    workloads = [540, 500, 470, 430, 390]
-    days      = [42, 81, 110, 170, 240]
-    players   = [
-        {
-            "player_name":            name,
-            "position":               pos,
-            "workload_30d":           workloads[i],
-            "days_since_last_injury": days[i],
-            "risk_score":             scores[i],
-        }
-        for i, (name, pos) in enumerate(roster)
-    ]
-    return {
-        "kpi":     {"high": 1, "medium": 2, "low": 2, "avg_score": 0.49},
-        "players": players,
-        "source":  "fallback",
-    }

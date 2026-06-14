@@ -55,20 +55,16 @@
         <span class="nav-icon">👤</span>
         <span>Player Efficiency</span>
       </div>
+      <div class="nav-item" data-page="xg">
+        <span class="nav-icon">🎯</span>
+        <span>Shot Quality (xG)</span>
+      </div>
       <div class="nav-item" data-page="cohesion">
         <span class="nav-icon">🕸️</span>
-        <span>Team Cohesion</span>
-      </div>
-      <div class="nav-item" data-page="injury">
-        <span class="nav-icon">🏥</span>
-        <span>Injury Risk</span>
-      </div>
-      <div class="nav-item" data-page="env">
-        <span class="nav-icon">🌡️</span>
-        <span>Environment Impact</span>
+        <span>Pass Networks</span>
       </div>
       <div class="nav-item" data-page="winprob">
-        <span class="nav-icon">🎯</span>
+        <span class="nav-icon">📈</span>
         <span>Win Probability</span>
       </div>
 
@@ -80,10 +76,15 @@
     </nav>
 
     <div class="sidebar-footer">
-      <div class="data-sources-label">Data Sources</div>
-      <div class="data-source"><div class="ds-dot"></div><span>StatsBomb</span></div>
-      <div class="data-source"><div class="ds-dot"></div><span>Transfermarkt</span></div>
-      <div class="data-source"><div class="ds-dot"></div><span>Open-Meteo</span></div>
+      <div class="data-sources-label">Data Source</div>
+      <div class="data-source"><div class="ds-dot"></div><span>StatsBomb (event data)</span></div>
+      <div class="data-sources-label" style="margin-top:12px">Scope</div>
+      <div class="data-source" style="line-height:1.4">
+        <span style="font-size:10px;color:var(--text-secondary)">
+          Big-5 leagues 2015/16 + World Cups 2018/22 + Euros 2020/24.
+          Descriptive analytics + validated xG.
+        </span>
+      </div>
     </div>
 
   </aside>
@@ -130,16 +131,12 @@
         <div id="player-content"></div>
       </div>
 
+      <div class="page" id="page-xg">
+        <div id="xg-content"></div>
+      </div>
+
       <div class="page" id="page-cohesion">
         <div id="cohesion-content"></div>
-      </div>
-
-      <div class="page" id="page-injury">
-        <div id="injury-content"></div>
-      </div>
-
-      <div class="page" id="page-env">
-        <div id="env-content"></div>
       </div>
 
       <div class="page" id="page-winprob">

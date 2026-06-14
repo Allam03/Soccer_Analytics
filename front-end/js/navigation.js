@@ -13,9 +13,8 @@
 const PAGE_TITLES = {
   dashboard: "Analytics Dashboard",
   player:    "Player Efficiency & Style Profiling",
-  cohesion:  "Team Cohesion Analysis",
-  injury:    "Injury Risk Prediction",
-  env:       "Environmental Impact Analysis",
+  xg:        "Shot Quality — Expected Goals (xG)",
+  cohesion:  "Pass Networks (Tactical)",
   winprob:   "Win Probability Modeling",
 };
 
