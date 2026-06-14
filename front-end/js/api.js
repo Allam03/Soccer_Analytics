@@ -77,4 +77,20 @@ const ApiService = {
   async loadWinProb() {
     return this.request(`/win-probability?team_id=${this.teamId}`);
   },
+
+  async loadShotMap() {
+    return this.request(`/shot-map?team_id=${this.teamId}`);
+  },
+
+  async loadLeagueXG() {
+    return this.request(`/league-xg`);
+  },
+
+  async loadMatches() {
+    return this.request(`/matches?team_id=${this.teamId}`);
+  },
+
+  async loadMatchTimeline(matchId) {
+    return this.request(`/match-xg-timeline?match_id=${matchId}`);
+  },
 };

@@ -26,6 +26,7 @@ FRONTEND RACE CONDITION
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import traceback
@@ -492,16 +493,23 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
         "carry_distance", "progressive_carries", "key_passes",
         "progressive_passes", "pressures", "dribbles_completed",
     ]
-    ARCHETYPE_NAMES = {
-        0: "Creator",        1: "Ball Winner",   2: "Wide Attacker",
-        3: "Box-to-Box",     4: "Finisher",      5: "Playmaker",
-        6: "Defensive Shield",
-    }
+    # Data-driven archetype labels written by Model 1 (cluster id -> name).
+    # Built from the cluster centroids at training time, so they describe what
+    # each cluster actually is rather than a fixed guess.
+    ARCHETYPE_NAMES: dict[int, str] = {}
+    if cluster_df is not None and "archetype" in cluster_df.columns:
+        ARCHETYPE_NAMES = {
+            int(c): str(a)
+            for c, a in cluster_df[["cluster_kmeans", "archetype"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        }
 
     try:
         rows = _query(
             """
-            SELECT p.player_id, p.player_name, p.position,
+            SELECT p.player_id, p.player_name,
+                   mode() WITHIN GROUP (ORDER BY pms.starting_position) AS position,
                    COUNT(*) AS matches,
                    AVG(pms.minutes_played) * COUNT(*) AS minutes,
                    AVG(pms.xg)                  AS xg_per_90,
@@ -521,7 +529,7 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
             FROM player_match_stats pms
             JOIN players p ON p.player_id = pms.player_id
             WHERE pms.team_id = %s
-            GROUP BY p.player_id, p.player_name, p.position
+            GROUP BY p.player_id, p.player_name
             HAVING COUNT(*) >= 3
             ORDER BY AVG(pms.xa + pms.xg) DESC
             LIMIT 12
@@ -533,19 +541,17 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
             rows = [dict(r) for r in rows]
 
             cluster_map: dict[str, str] = {}
-            if cluster_df is not None and "team_id" in cluster_df.columns:
+            if cluster_df is not None and "team_id" in cluster_df.columns and "archetype" in cluster_df.columns:
                 team_clusters = cluster_df[cluster_df["team_id"] == team_id]
-                if not team_clusters.empty:
-                    for _, cr in team_clusters.iterrows():
-                        cid = int(cr.get("cluster_kmeans", 0))
-                        cluster_map[str(cr["player_name"])] = ARCHETYPE_NAMES.get(cid, "Midfielder")
+                for _, cr in team_clusters.iterrows():
+                    cluster_map[str(cr["player_name"])] = str(cr["archetype"])
 
             for r in rows:
                 if r["player_name"] in cluster_map:
                     r["player_type"] = cluster_map[r["player_name"]]
                 else:
                     cid = _predict_cluster(r, FEATURES, kmeans, scaler)
-                    r["player_type"] = ARCHETYPE_NAMES.get(cid, "Midfielder")
+                    r["player_type"] = ARCHETYPE_NAMES.get(cid, "Unclassified")
 
             leader = rows[0]
             radar  = _build_radar(leader)
@@ -573,7 +579,7 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
                 players_out.append({
                     "player_name":     str(row["player_name"]),
                     "position":        str(row.get("position") or "-"),
-                    "player_type":     ARCHETYPE_NAMES.get(cid, "Midfielder"),
+                    "player_type":     str(row.get("archetype") or ARCHETYPE_NAMES.get(cid, "Unclassified")),
                     "matches":         int(row.get("matches_played", 10)),
                     "minutes":         int(row.get("matches_played", 10)) * 85,
                     "xg_per_90":       round(float(row.get("shots") or 2) * 0.10, 2),
@@ -641,6 +647,35 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
                 X = scaler.transform(full_avg.values.reshape(1, -1))
                 predicted_goals = round(float(gbr.predict(X)[0]), 2)
 
+    # Average pitch position per player (weighted by passes made from there),
+    # for the on-pitch network layout. StatsBomb units: x 0-120, y 0-80.
+    nodes = []
+    try:
+        node_rows = _query(
+            """
+            SELECT p.player_name AS name,
+                   SUM(pne.avg_x_start * pne.pass_count) / NULLIF(SUM(pne.pass_count),0) AS x,
+                   SUM(pne.avg_y_start * pne.pass_count) / NULLIF(SUM(pne.pass_count),0) AS y,
+                   SUM(pne.pass_count) AS volume
+            FROM pass_network_edges pne
+            JOIN players p ON p.player_id = pne.passer_id
+            WHERE pne.team_id = %s
+            GROUP BY p.player_name
+            HAVING SUM(pne.pass_count) > 0
+            ORDER BY SUM(pne.pass_count) DESC
+            LIMIT 16
+            """,
+            (team_id,),
+        )
+        nodes = [{
+            "name":   r["name"],
+            "x":      round(float(r["x"]), 1),
+            "y":      round(float(r["y"]), 1),
+            "volume": int(r["volume"]),
+        } for r in node_rows if r["x"] is not None and r["y"] is not None]
+    except Exception as exc:
+        logger.warning("/api/team-cohesion team=%d node error: %s", team_id, exc)
+
     try:
         edges = _query(
             """
@@ -672,6 +707,7 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 
             return {
                 "kpi":   final_kpi,
+                "nodes": nodes,
                 "edges": [
                     {"from": e["passer"], "to": e["receiver"],
                      "weight": round(float(e["weight"] or 0), 1)}
@@ -743,8 +779,17 @@ def xg_finishing(team_id: int) -> dict[str, Any]:
         ids = [int(x) for x in grp["player_id"].dropna().tolist()]
         if ids:
             rows = _query(
-                "SELECT player_id, player_name, COALESCE(position,'-') AS position "
-                "FROM players WHERE player_id = ANY(%s)",
+                """
+                SELECT p.player_id, p.player_name,
+                       COALESCE(
+                           mode() WITHIN GROUP (ORDER BY pms.starting_position),
+                           '-'
+                       ) AS position
+                FROM players p
+                LEFT JOIN player_match_stats pms ON pms.player_id = p.player_id
+                WHERE p.player_id = ANY(%s)
+                GROUP BY p.player_id, p.player_name
+                """,
                 (ids,),
             )
             name_map = {r["player_id"]: (r["player_name"], r["position"]) for r in rows}
@@ -780,6 +825,277 @@ def xg_finishing(team_id: int) -> dict[str, Any]:
             "shots":      n_shots,
         },
         "source": source,
+    }
+
+
+# =============================================================================
+# /api/shot-map   — every shot for a team on the pitch, sized/coloured by xG
+# =============================================================================
+
+def _xg_pred_lookup() -> dict[int, float]:
+    """shot_id -> our model's xg_pred, from the xG artifact (empty if missing)."""
+    shots = _A.get("mxg", {}).get("shots")
+    if shots is None or "shot_id" not in shots.columns or "xg_pred" not in shots.columns:
+        return {}
+    return dict(zip(shots["shot_id"].astype(int), shots["xg_pred"].astype(float)))
+
+
+@app.get("/api/shot-map")
+def shot_map(team_id: int) -> dict[str, Any]:
+    """All shots taken by a team, with pitch coordinates and xG.
+
+    Coordinates are StatsBomb pitch units (x 0-120 toward goal, y 0-80).
+    xG is our from-scratch model's prediction (falls back to statsbomb_xg).
+    """
+    _validate_team_id(team_id)
+    xgp = _xg_pred_lookup()
+    try:
+        rows = _query(
+            """
+            SELECT s.shot_id, s.x, s.y, s.minute, s.body_part,
+                   s.statsbomb_xg, s.is_goal, p.player_name
+            FROM shots s
+            JOIN players p ON p.player_id = s.player_id
+            WHERE s.team_id = %s AND s.x IS NOT NULL AND s.y IS NOT NULL
+            ORDER BY s.minute
+            """,
+            (team_id,),
+        )
+    except Exception as exc:
+        logger.warning("/api/shot-map team=%d DB error: %s", team_id, exc)
+        _last_errors["shot_map"] = str(exc)
+        return {"shots": [], "kpi": {}, "source": "fallback"}
+
+    shots_out, tot_xg, goals = [], 0.0, 0
+    for r in rows:
+        xg = xgp.get(int(r["shot_id"]))
+        if xg is None:
+            xg = float(r["statsbomb_xg"] or 0.0)
+        is_goal = bool(r["is_goal"])
+        tot_xg += xg
+        goals  += int(is_goal)
+        shots_out.append({
+            "x":           round(float(r["x"]), 1),
+            "y":           round(float(r["y"]), 1),
+            "xg":          round(xg, 3),
+            "is_goal":     is_goal,
+            "minute":      int(r["minute"]) if r["minute"] is not None else None,
+            "body_part":   r["body_part"] or "-",
+            "player_name": r["player_name"],
+        })
+    return {
+        "shots": shots_out,
+        "kpi": {
+            "shots":    len(shots_out),
+            "goals":    goals,
+            "team_xg":  round(tot_xg, 1),
+            "xg_per_shot": round(tot_xg / len(shots_out), 3) if shots_out else 0,
+        },
+        "source": "database+artifact" if xgp else "database",
+    }
+
+
+# =============================================================================
+# /api/league-xg   — season table ranked by xG over/under-performance + xPoints
+# =============================================================================
+
+def _poisson_pmf(k: int, lam: float) -> float:
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    return math.exp(-lam) * lam ** k / math.factorial(k)
+
+
+def _xpoints(xg_for: float, xg_against: float, max_goals: int = 8) -> float:
+    """Expected league points from a match, modelling each side's goals as
+    independent Poisson(xG). xPoints = 3*P(win) + 1*P(draw)."""
+    pf = [_poisson_pmf(i, xg_for)     for i in range(max_goals + 1)]
+    pa = [_poisson_pmf(j, xg_against) for j in range(max_goals + 1)]
+    p_win = p_draw = 0.0
+    for i in range(max_goals + 1):
+        for j in range(max_goals + 1):
+            p = pf[i] * pa[j]
+            if i > j:
+                p_win += p
+            elif i == j:
+                p_draw += p
+    return 3 * p_win + p_draw
+
+
+@app.get("/api/league-xg")
+def league_xg(season: str = "2015/2016") -> dict[str, Any]:
+    """Team table for a season: goals vs xG (for and against), points vs
+    expected points. Aggregates our shot-level xG up to the match, then to the
+    season. Defaults to 2015/16 — the only full league season in the data."""
+    shots = _A.get("mxg", {}).get("shots")
+    if shots is None or "match_id" not in shots.columns:
+        return {"teams": [], "season": season, "source": "fallback"}
+
+    xg_col = "xg_pred" if "xg_pred" in shots.columns else "statsbomb_xg"
+    # match_id, team_id -> summed xG
+    mt = (shots.groupby(["match_id", "team_id"])[xg_col].sum()
+                .reset_index().rename(columns={xg_col: "xg"}))
+    xg_by = {(int(r.match_id), int(r.team_id)): float(r.xg) for r in mt.itertuples()}
+
+    try:
+        matches = _query(
+            """
+            SELECT m.match_id, m.home_team_id, m.away_team_id,
+                   m.home_score, m.away_score,
+                   th.team_name AS home_name, ta.team_name AS away_name
+            FROM matches m
+            JOIN teams th ON th.team_id = m.home_team_id
+            JOIN teams ta ON ta.team_id = m.away_team_id
+            WHERE m.season = %s
+            """,
+            (season,),
+        )
+    except Exception as exc:
+        logger.warning("/api/league-xg DB error: %s", exc)
+        _last_errors["league_xg"] = str(exc)
+        return {"teams": [], "season": season, "source": "fallback"}
+
+    agg: dict[int, dict[str, Any]] = {}
+
+    def _row(tid: int, name: str) -> dict[str, Any]:
+        return agg.setdefault(tid, {
+            "team_id": tid, "team_name": name, "played": 0,
+            "goals_for": 0, "goals_against": 0, "xg_for": 0.0, "xg_against": 0.0,
+            "points": 0, "xpoints": 0.0,
+        })
+
+    for m in matches:
+        if m["home_score"] is None or m["away_score"] is None:
+            continue
+        hid, aid = int(m["home_team_id"]), int(m["away_team_id"])
+        hs, as_ = int(m["home_score"]), int(m["away_score"])
+        hxg = xg_by.get((int(m["match_id"]), hid), 0.0)
+        axg = xg_by.get((int(m["match_id"]), aid), 0.0)
+        h, a = _row(hid, m["home_name"]), _row(aid, m["away_name"])
+        h["played"] += 1; a["played"] += 1
+        h["goals_for"] += hs; h["goals_against"] += as_
+        a["goals_for"] += as_; a["goals_against"] += hs
+        h["xg_for"] += hxg; h["xg_against"] += axg
+        a["xg_for"] += axg; a["xg_against"] += hxg
+        h["points"] += 3 if hs > as_ else (1 if hs == as_ else 0)
+        a["points"] += 3 if as_ > hs else (1 if hs == as_ else 0)
+        h["xpoints"] += _xpoints(hxg, axg)
+        a["xpoints"] += _xpoints(axg, hxg)
+
+    teams = []
+    for t in agg.values():
+        if t["played"] == 0:
+            continue
+        t["xg_for"] = round(t["xg_for"], 1)
+        t["xg_against"] = round(t["xg_against"], 1)
+        t["xg_diff"] = round(t["xg_for"] - t["xg_against"], 1)
+        t["xpoints"] = round(t["xpoints"], 1)
+        t["points_diff"] = round(t["points"] - t["xpoints"], 1)
+        teams.append(t)
+    teams.sort(key=lambda x: x["xpoints"], reverse=True)
+    return {"teams": teams, "season": season,
+            "source": "database+artifact" if teams else "fallback"}
+
+
+# =============================================================================
+# /api/matches   — match list for the in-game / timeline selector
+# =============================================================================
+
+@app.get("/api/matches")
+def matches(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+    try:
+        rows = _query(
+            """
+            SELECT m.match_id, m.match_date, m.home_score, m.away_score,
+                   m.home_team_id, m.away_team_id,
+                   th.team_name AS home_name, ta.team_name AS away_name
+            FROM matches m
+            JOIN teams th ON th.team_id = m.home_team_id
+            JOIN teams ta ON ta.team_id = m.away_team_id
+            WHERE m.home_team_id = %s OR m.away_team_id = %s
+            ORDER BY m.match_date DESC NULLS LAST
+            LIMIT 40
+            """,
+            (team_id, team_id),
+        )
+    except Exception as exc:
+        logger.warning("/api/matches team=%d DB error: %s", team_id, exc)
+        return {"matches": [], "source": "fallback"}
+    out = [{
+        "match_id":  int(r["match_id"]),
+        "date":      str(r["match_date"]) if r["match_date"] else "",
+        "home_name": r["home_name"], "away_name": r["away_name"],
+        "home_score": r["home_score"], "away_score": r["away_score"],
+        "label": f'{r["home_name"]} {r["home_score"]}-{r["away_score"]} {r["away_name"]}',
+    } for r in rows]
+    return {"matches": out, "source": "database"}
+
+
+# =============================================================================
+# /api/match-xg-timeline   — cumulative xG race for both teams in one match
+# =============================================================================
+
+@app.get("/api/match-xg-timeline")
+def match_xg_timeline(match_id: int) -> dict[str, Any]:
+    xgp = _xg_pred_lookup()
+    try:
+        meta = _query(
+            """
+            SELECT m.home_team_id, m.away_team_id, m.home_score, m.away_score,
+                   th.team_name AS home_name, ta.team_name AS away_name
+            FROM matches m
+            JOIN teams th ON th.team_id = m.home_team_id
+            JOIN teams ta ON ta.team_id = m.away_team_id
+            WHERE m.match_id = %s
+            """,
+            (match_id,),
+        )
+        if not meta:
+            raise HTTPException(status_code=404, detail="match not found")
+        m = meta[0]
+        shots = _query(
+            """
+            SELECT s.shot_id, s.team_id, s.minute, s.statsbomb_xg, s.is_goal,
+                   p.player_name
+            FROM shots s
+            JOIN players p ON p.player_id = s.player_id
+            WHERE s.match_id = %s
+            ORDER BY s.minute
+            """,
+            (match_id,),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("/api/match-xg-timeline match=%d DB error: %s", match_id, exc)
+        return {"source": "fallback"}
+
+    hid, aid = int(m["home_team_id"]), int(m["away_team_id"])
+    home_pts, away_pts, home_goals, away_goals = [], [], [], []
+    h_cum = a_cum = 0.0
+    for s in shots:
+        xg = xgp.get(int(s["shot_id"]))
+        if xg is None:
+            xg = float(s["statsbomb_xg"] or 0.0)
+        minute = int(s["minute"]) if s["minute"] is not None else 0
+        if int(s["team_id"]) == hid:
+            h_cum += xg
+            home_pts.append({"x": minute, "y": round(h_cum, 2)})
+            if s["is_goal"]:
+                home_goals.append({"x": minute, "y": round(h_cum, 2), "player": s["player_name"]})
+        else:
+            a_cum += xg
+            away_pts.append({"x": minute, "y": round(a_cum, 2)})
+            if s["is_goal"]:
+                away_goals.append({"x": minute, "y": round(a_cum, 2), "player": s["player_name"]})
+
+    return {
+        "home_name": m["home_name"], "away_name": m["away_name"],
+        "home_score": m["home_score"], "away_score": m["away_score"],
+        "home_xg": round(h_cum, 2), "away_xg": round(a_cum, 2),
+        "home_series": home_pts, "away_series": away_pts,
+        "home_goals": home_goals, "away_goals": away_goals,
+        "source": "database+artifact" if xgp else "database",
     }
 
 

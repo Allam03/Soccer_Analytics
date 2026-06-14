@@ -23,6 +23,18 @@
 </div>
 
 <div class="card mb-16">
+  <div class="card-title">Shot Map — all shots, sized by xG</div>
+  <div class="chart-wrap" style="height:320px">
+    <canvas id="shotMapChart"></canvas>
+  </div>
+  <p class="text-muted fs-11 mt-8">
+    Each marker is a shot at its pitch location (attacking half, goal at right).
+    Marker size scales with xG; green = goal, grey = no goal. Hover for player,
+    xG, body part and minute.
+  </p>
+</div>
+
+<div class="card mb-16">
   <div class="card-title">Goals vs Expected Goals — top players</div>
   <div class="chart-wrap" style="height:260px">
     <canvas id="xgChart"></canvas>

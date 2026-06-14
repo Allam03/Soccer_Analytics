@@ -113,17 +113,25 @@ async function refreshAllData() {
     (p) => _pendingRender.add(p)
   );
 
+  // Wrap each call in Promise.resolve().then(fn) so a *synchronous* throw
+  // (e.g. a stale cached api.js missing a method) becomes an isolated
+  // rejection instead of aborting the whole refresh and blanking every panel.
   const results = await Promise.allSettled([
-    ApiService.loadDashboard(),
-    ApiService.loadPlayer(),
-    ApiService.loadCohesion(),
-    ApiService.loadXG(),
-    ApiService.loadWinProb(),
-  ]);
+    () => ApiService.loadDashboard(),
+    () => ApiService.loadPlayer(),
+    () => ApiService.loadCohesion(),
+    () => ApiService.loadXG(),
+    () => ApiService.loadWinProb(),
+    () => ApiService.loadShotMap(),
+    () => ApiService.loadLeagueXG(),
+    () => ApiService.loadMatches(),
+  ].map((fn) => Promise.resolve().then(fn)));
 
-  const [dashRes, playerRes, cohesionRes, xgRes, winprobRes] = results;
+  const [dashRes, playerRes, cohesionRes, xgRes, winprobRes,
+         shotmapRes, leagueRes, matchesRes] = results;
 
-  const labels = ["dashboard", "player", "cohesion", "xg", "winprob"];
+  const labels = ["dashboard", "player", "cohesion", "xg", "winprob",
+                  "shotmap", "leaguexg", "matches"];
   results.forEach((r, i) => {
     if (r.status === "rejected") {
       console.error(`[refreshAllData] ${labels[i]} fetch failed:`, r.reason);
@@ -137,6 +145,9 @@ async function refreshAllData() {
   AppState.cohesion  = cohesionRes.status === "fulfilled" ? cohesionRes.value : null;
   AppState.xg        = xgRes.status       === "fulfilled" ? xgRes.value       : null;
   AppState.winprob   = winprobRes.status  === "fulfilled" ? winprobRes.value  : null;
+  AppState.shotmap   = shotmapRes.status  === "fulfilled" ? shotmapRes.value  : null;
+  AppState.leaguexg  = leagueRes.status   === "fulfilled" ? leagueRes.value   : null;
+  AppState.matches   = matchesRes.status  === "fulfilled" ? matchesRes.value  : null;
 
   const activePage = document.querySelector(".page.active")?.id?.replace("page-", "") || "dashboard";
   debug("Active page is:", activePage);
@@ -231,8 +242,52 @@ function renderDashboard() {
   // Finishing-leader cards are rendered in refreshAllData()/onPageActivated()
   // once the xG payload has resolved (it may arrive after the dashboard data).
 
+  renderLeagueXG();
+
   animateCards();
   animateProgressBars();
+}
+
+// ---------------------------------------------------------------------------
+// renderLeagueXG  (dashboard) — season table, points vs expected points
+// ---------------------------------------------------------------------------
+
+function renderLeagueXG() {
+  const data  = AppState.leaguexg;
+  const tbody = document.querySelector("#leagueXgTable tbody");
+  if (!tbody) return;
+  const teams = data?.teams || [];
+
+  const titleEl = document.getElementById("leagueXgTitle");
+  if (titleEl && data?.season) {
+    titleEl.textContent = `Season xG Performance ${data.season} — points vs expected points`;
+  }
+
+  if (!teams.length) {
+    tbody.innerHTML = '<tr><td colspan="11" class="text-muted text-center">No xG data</td></tr>';
+    return;
+  }
+
+  const selected = getSelectedTeamName();
+  tbody.innerHTML = teams.slice(0, 20).map((t, i) => {
+    const d = Number(t.points_diff || 0);
+    const color = d >= 0 ? "var(--accent)" : "var(--red)";
+    const isSel = t.team_name === selected;
+    return `
+      <tr${isSel ? ' style="background:rgba(56,189,131,0.07)"' : ""}>
+        <td class="text-muted">${i + 1}</td>
+        <td class="fw-700">${t.team_name}</td>
+        <td>${t.played}</td>
+        <td>${t.goals_for}</td>
+        <td class="text-muted">${t.xg_for}</td>
+        <td>${t.goals_against}</td>
+        <td class="text-muted">${t.xg_against}</td>
+        <td>${t.xg_diff > 0 ? "+" : ""}${t.xg_diff}</td>
+        <td class="fw-700">${t.points}</td>
+        <td class="text-muted">${t.xpoints}</td>
+        <td style="color:${color};font-weight:600">${d >= 0 ? "+" : ""}${d.toFixed(1)}</td>
+      </tr>`;
+  }).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -318,23 +373,24 @@ function renderPlayer() {
   if (clusterGrid && players.length) {
     const groups = {};
     for (const p of players) {
-      const t = p.player_type || "Midfielder";
+      const t = p.player_type || "Unclassified";
       if (!groups[t]) groups[t] = [];
       groups[t].push(p.player_name);
     }
 
-    const CLUSTER_COLORS = {
-      "Creator":          { border: "var(--accent)", badge: "var(--accent-dim)", text: "var(--accent)" },
-      "Finisher":         { border: "var(--red)",    badge: "var(--red-dim)",    text: "var(--red)"    },
-      "Ball Winner":      { border: "var(--amber)",  badge: "var(--amber-dim)",  text: "var(--amber)"  },
-      "Box-to-Box":       { border: "var(--cyan)",   badge: "rgba(34,211,238,0.1)", text: "var(--cyan)" },
-      "Wide Attacker":    { border: "var(--accent)", badge: "var(--accent-dim)", text: "var(--accent)" },
-      "Playmaker":        { border: "var(--cyan)",   badge: "rgba(34,211,238,0.1)", text: "var(--cyan)" },
-      "Defensive Shield": { border: "var(--amber)",  badge: "var(--amber-dim)",  text: "var(--amber)"  },
-    };
+    // Colour by the broad role implied by the data-driven archetype name.
+    // Keyed on substrings so it survives label changes from Model 1.
+    const ROLE_COLORS = [
+      { match: /defender|defensive/i, c: { border: "var(--cyan)",   badge: "rgba(34,211,238,0.1)", text: "var(--cyan)"   } },
+      { match: /midfield|winning/i,   c: { border: "var(--amber)",  badge: "var(--amber-dim)",     text: "var(--amber)"  } },
+      { match: /winger|playmaker/i,   c: { border: "var(--accent)", badge: "var(--accent-dim)",    text: "var(--accent)" } },
+      { match: /goalscorer|forward/i, c: { border: "var(--red)",    badge: "var(--red-dim)",       text: "var(--red)"    } },
+    ];
+    const colorFor = (type) =>
+      (ROLE_COLORS.find((r) => r.match.test(type)) || ROLE_COLORS[2]).c;
 
     clusterGrid.innerHTML = Object.entries(groups).slice(0, 4).map(([type, names]) => {
-      const c = CLUSTER_COLORS[type] || CLUSTER_COLORS["Creator"];
+      const c = colorFor(type);
       const isSelected = names.includes(leader.player_name);
       return `
         <div class="cluster-card${isSelected ? " selected" : ""}"
@@ -387,7 +443,10 @@ function renderCohesion() {
   if (values[3]) values[3].textContent = (kpi.clustering_coeff || 0).toFixed(2);
 
   requestAnimationFrame(() => {
-    PassNetwork.init(data.edges && data.edges.length ? data.edges : null);
+    PassNetwork.init(
+      data.edges && data.edges.length ? data.edges : null,
+      data.nodes && data.nodes.length ? data.nodes : null,
+    );
   });
 
   if (data.edges && data.edges.length) {
@@ -471,6 +530,7 @@ function renderXG() {
 
   requestAnimationFrame(() => {
     Charts.initXGChart(players.slice(0, 10));
+    Charts.initShotMap(AppState.shotmap?.shots || []);
   });
 
   const tbody = document.querySelector("#page-xg table tbody");
@@ -524,6 +584,47 @@ function renderWinProb() {
     requestAnimationFrame(() => {
       Charts.initWinProb(data.timeline);
     });
+  }
+
+  _initMatchSelector();
+}
+
+// ---------------------------------------------------------------------------
+// Match xG timeline (win-probability page) — selector + cumulative-xG chart
+// ---------------------------------------------------------------------------
+
+function _initMatchSelector() {
+  const sel = document.getElementById("matchSelector");
+  if (!sel) return;
+  const matches = AppState.matches?.matches || [];
+
+  if (!matches.length) {
+    sel.innerHTML = '<option>No matches available</option>';
+    return;
+  }
+
+  sel.innerHTML = matches
+    .map((m) => `<option value="${m.match_id}">${m.label}</option>`)
+    .join("");
+
+  sel.onchange = () => _loadMatchTimeline(Number(sel.value));
+  _loadMatchTimeline(Number(matches[0].match_id));
+}
+
+async function _loadMatchTimeline(matchId) {
+  if (!matchId) return;
+  try {
+    const tl = await ApiService.loadMatchTimeline(matchId);
+    requestAnimationFrame(() => Charts.initMatchTimeline(tl));
+    const summary = document.getElementById("matchXgSummary");
+    if (summary && tl) {
+      summary.innerHTML =
+        `<strong>${tl.home_name} ${tl.home_score}–${tl.away_score} ${tl.away_name}</strong> · ` +
+        `xG ${Number(tl.home_xg).toFixed(2)}–${Number(tl.away_xg).toFixed(2)}. ` +
+        `Diamonds mark actual goals; the steeper line created chances faster.`;
+    }
+  } catch (err) {
+    console.error("[_loadMatchTimeline]", err);
   }
 }
 
@@ -736,6 +837,6 @@ function debug(...args) {
 
 window.addEventListener("resize", debounce(() => {
   if (document.getElementById("page-cohesion")?.classList.contains("active")) {
-    PassNetwork.init(AppState.cohesion?.edges || null);
+    PassNetwork.init(AppState.cohesion?.edges || null, AppState.cohesion?.nodes || null);
   }
 }, 300));

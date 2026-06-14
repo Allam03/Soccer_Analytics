@@ -381,4 +381,170 @@ const Charts = {
       },
     });
   },
+
+  // ── Shot map (scatter on an attacking-half pitch) ─────────────────────────
+  // StatsBomb coords: x 0-120 (goal at 120), y 0-80. We show the attacking
+  // half (x 60-120). Point radius scales with xG; colour marks goal vs miss.
+  initShotMap(shots) {
+    const canvas = document.getElementById('shotMapChart');
+    if (!canvas) return;
+    destroyChart(canvas);
+    if (!shots || !shots.length) return;
+
+    const goals  = shots.filter(s => s.is_goal);
+    const misses = shots.filter(s => !s.is_goal);
+    const r = s => 3 + Math.sqrt(Math.max(0, s.xg)) * 16;
+
+    // Plugin: draw pitch markings (penalty box, 6-yard box, goal, arc).
+    const pitch = {
+      id: 'pitch',
+      beforeDatasetsDraw(chart) {
+        const { ctx, chartArea: a, scales } = chart;
+        const X = v => scales.x.getPixelForValue(v);
+        const Y = v => scales.y.getPixelForValue(v);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(56,189,131,0.30)';
+        ctx.lineWidth = 1;
+        // outer (attacking half)
+        ctx.strokeRect(a.left, a.top, a.right - a.left, a.bottom - a.top);
+        // penalty box: x 102-120, y 18-62
+        ctx.strokeRect(X(102), Y(62), X(120) - X(102), Y(18) - Y(62));
+        // six-yard box: x 114-120, y 30-50
+        ctx.strokeRect(X(114), Y(50), X(120) - X(114), Y(30) - Y(50));
+        // goal: x 120, y 36-44
+        ctx.strokeStyle = 'rgba(56,189,131,0.7)';
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(X(120), Y(36)); ctx.lineTo(X(120), Y(44)); ctx.stroke();
+        // penalty spot
+        ctx.fillStyle = 'rgba(56,189,131,0.4)';
+        ctx.beginPath(); ctx.arc(X(108), Y(40), 2, 0, 2 * Math.PI); ctx.fill();
+        ctx.restore();
+      },
+    };
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'scatter',
+      data: {
+        datasets: [
+          {
+            label: 'Goals',
+            data: goals.map(s => ({ x: s.x, y: s.y, _s: s })),
+            backgroundColor: 'rgba(56,189,131,0.75)',
+            borderColor: C.accent,
+            borderWidth: 1,
+            pointRadius: ctx => r(ctx.raw._s),
+            pointHoverRadius: ctx => r(ctx.raw._s) + 2,
+          },
+          {
+            label: 'Shots (no goal)',
+            data: misses.map(s => ({ x: s.x, y: s.y, _s: s })),
+            backgroundColor: 'rgba(136,150,170,0.30)',
+            borderColor: 'rgba(136,150,170,0.6)',
+            borderWidth: 1,
+            pointRadius: ctx => r(ctx.raw._s),
+            pointHoverRadius: ctx => r(ctx.raw._s) + 2,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { usePointStyle: true, color: '#8896aa',
+                      font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16 },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: {
+              title: () => '',
+              label: ctx => {
+                const s = ctx.raw._s;
+                return ` ${s.player_name} — xG ${Number(s.xg).toFixed(2)}` +
+                       `${s.is_goal ? ' (GOAL)' : ''} • ${s.body_part} • ${s.minute}'`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { min: 60, max: 122, display: false, grid: { display: false } },
+          y: { min: 0,  max: 80,  display: false, grid: { display: false }, reverse: true },
+        },
+      },
+      plugins: [pitch],
+    });
+  },
+
+  // ── Match xG timeline (cumulative xG race) ────────────────────────────────
+  initMatchTimeline(payload) {
+    const canvas = document.getElementById('matchTimelineChart');
+    if (!canvas || !payload) return;
+    destroyChart(canvas);
+
+    // Step lines: prepend (0,0) so each team starts at zero.
+    const series = pts => [{ x: 0, y: 0 }, ...pts.map(p => ({ x: p.x, y: p.y }))];
+    const goalPts = (arr, color) => ({
+      type: 'scatter',
+      label: '_goals',
+      data: arr.map(g => ({ x: g.x, y: g.y, _g: g })),
+      backgroundColor: color,
+      borderColor: '#0a0e1a',
+      borderWidth: 2,
+      pointRadius: 7,
+      pointHoverRadius: 9,
+      pointStyle: 'rectRot',
+      showLine: false,
+    });
+
+    new Chart(canvas.getContext('2d'), {
+      data: {
+        datasets: [
+          {
+            type: 'line', label: payload.home_name,
+            data: series(payload.home_series),
+            borderColor: C.accent, backgroundColor: 'rgba(56,189,131,0.06)',
+            borderWidth: 2, stepped: true, fill: true, pointRadius: 0, tension: 0,
+          },
+          {
+            type: 'line', label: payload.away_name,
+            data: series(payload.away_series),
+            borderColor: C.cyan, backgroundColor: 'rgba(6,182,212,0.05)',
+            borderWidth: 2, stepped: true, fill: true, pointRadius: 0, tension: 0,
+          },
+          goalPts(payload.home_goals, C.accent),
+          goalPts(payload.away_goals, C.cyan),
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'nearest', intersect: true },
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16,
+              filter: item => item.text !== '_goals',
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: {
+              label: ctx => ctx.raw._g
+                ? ` ⚽ ${ctx.raw._g.player} (${ctx.raw._g.x}')`
+                : ` ${ctx.dataset.label}: ${Number(ctx.raw.y).toFixed(2)} xG`,
+            },
+          },
+        },
+        scales: makeScales({
+          x: { type: 'linear', min: 0, max: 95,
+               title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } } },
+          y: { min: 0,
+               title: { display: true, text: 'Cumulative xG', color: '#4a5568', font: { size: 10 } } },
+        }),
+      },
+    });
+  },
 };

@@ -18,13 +18,16 @@
   />
 
   <!-- CSS load order matters: tokens → reset → layout → components → pages -->
-  <link rel="stylesheet" href="/static/css/variables.css" />
-  <link rel="stylesheet" href="/static/css/reset.css" />
-  <link rel="stylesheet" href="/static/css/layout.css" />
-  <link rel="stylesheet" href="/static/css/components.css" />
-  <link rel="stylesheet" href="/static/css/pages.css" />
+  <link rel="stylesheet" href="/static/css/variables.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/reset.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/layout.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/components.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/pages.css?v=2.5.0" />
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+  <!-- Must load synchronously BEFORE the body scripts: charts.js references
+       Chart.defaults at the top level. With `defer` it would run after the
+       non-deferred body scripts and throw "Chart is not defined". -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -164,12 +167,12 @@
   6. pageLoader.js  — async HTML injection; sets window.pagesLoadedPromise
                       main.js awaits this before rendering anything
 -->
-<script src="/static/js/charts.js"></script>
-<script src="/static/js/passNetwork.js"></script>
-<script src="/static/js/navigation.js"></script>
-<script src="/static/js/api.js"></script>
-<script src="/static/js/main.js"></script>
-<script src="/static/js/pageLoader.js"></script>
+<script src="/static/js/charts.js?v=2.5.0"></script>
+<script src="/static/js/passNetwork.js?v=2.5.0"></script>
+<script src="/static/js/navigation.js?v=2.5.0"></script>
+<script src="/static/js/api.js?v=2.5.0"></script>
+<script src="/static/js/main.js?v=2.5.0"></script>
+<script src="/static/js/pageLoader.js?v=2.5.0"></script>
 
 </body>
 </html>

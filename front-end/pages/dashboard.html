@@ -44,3 +44,23 @@
     <!-- Populated by renderFinishingLeaders() -->
   </div>
 </div>
+
+<div class="card mt-16">
+  <div class="card-title" id="leagueXgTitle">Season xG Performance — points vs expected points</div>
+  <table class="data-table" id="leagueXgTable">
+    <thead>
+      <tr>
+        <th>#</th><th>Team</th><th>P</th>
+        <th>GF</th><th>xGF</th><th>GA</th><th>xGA</th>
+        <th>xGD</th><th>Pts</th><th>xPts</th><th>Pts − xPts</th>
+      </tr>
+    </thead>
+    <tbody><!-- populated by renderLeagueXG() --></tbody>
+  </table>
+  <p class="text-muted fs-11 mt-8">
+    Expected points (xPts) model each side's goals as Poisson(team xG) per match.
+    A large positive Pts − xPts means a team has out-performed the quality of its
+    chances (finishing or goalkeeping over-performance, or variance). Aggregated
+    across all teams in the season.
+  </p>
+</div>

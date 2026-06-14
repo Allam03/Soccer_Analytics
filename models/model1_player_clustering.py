@@ -74,10 +74,56 @@ def position_group(pos) -> str:
         return "FWD"
     return "UNK"
 
-ARCHETYPE_LABELS = {
-    # Populated after fitting -- maps cluster id -> human-readable label.
-    # Example: {0: "Defensive Midfielder", 1: "Wide Attacker", ...}
+# Data-driven archetype labelling.
+#
+# KMeans cluster ids are arbitrary, so a fixed id->name map is meaningless: the
+# cluster that happens to be "0" on one training run is a different group on the
+# next. Instead we describe each cluster from its own centroid. Each signature
+# below is a set of +/- feature weights; we score every cluster's z-scored
+# feature profile against every signature and assign the best-matching label.
+# This makes the labels reflect what the cluster actually is, and it survives
+# re-training and changes in k.
+SIGNATURES: dict[str, dict[str, int]] = {
+    "Ball-Winning Midfielder": {"tackles": 1, "pressures": 1, "interceptions": 1, "shots": -1},
+    "Deep-Lying Playmaker":    {"passes_attempted": 1, "progressive_passes": 1, "shots": -1, "tackles": -1},
+    "Advanced Playmaker":      {"key_passes": 1, "progressive_passes": 1, "dribbles_completed": 1},
+    "Dribbling Winger":        {"dribbles_completed": 1, "progressive_carries": 1, "carry_distance": 1},
+    "Goalscorer":              {"shots": 1, "key_passes": 1, "tackles": -1, "clearances": -1},
+    "Ball-Playing Defender":   {"progressive_passes": 1, "clearances": 1, "interceptions": 1, "shots": -1},
+    "No-Nonsense Defender":    {"clearances": 1, "interceptions": 1, "progressive_passes": -1},
+    "Pressing Forward":        {"pressures": 1, "shots": 1, "clearances": -1},
 }
+
+
+def label_clusters(profile_z: pd.DataFrame) -> dict[int, str]:
+    """
+    Assign a human-readable archetype to each cluster from its z-scored centroid.
+
+    profile_z: index = cluster id, columns = FEATURES, values = z-scores of the
+    cluster mean across clusters (how much this cluster over/under-indexes on
+    each feature). Returns {cluster_id: label}. Collisions are resolved by giving
+    the stronger-scoring cluster the label and the other its next-best signature.
+    """
+    # score[cid][label] = dot(centroid_z, signature weights)
+    scored: list[tuple[float, int, str]] = []
+    for cid in profile_z.index:
+        z = profile_z.loc[cid]
+        for name, weights in SIGNATURES.items():
+            s = sum(w * float(z.get(f, 0.0)) for f, w in weights.items())
+            scored.append((s, int(cid), name))
+    scored.sort(reverse=True)  # strongest matches first
+
+    labels: dict[int, str] = {}
+    used: set[str] = set()
+    for _, cid, name in scored:
+        if cid in labels or name in used:
+            continue
+        labels[cid] = name
+        used.add(name)
+    # Any cluster still unlabelled (more clusters than signatures) gets a fallback.
+    for cid in profile_z.index:
+        labels.setdefault(int(cid), "Hybrid Role")
+    return labels
 
 
 def load_features(conn) -> pd.DataFrame:
@@ -209,6 +255,19 @@ def run(conn, output_dir: str = "artifacts/model1") -> Dict[str, Any]:
     df["cluster_dbscan"] = dbscan.labels_
     df["cluster_gmm"]    = gmm.predict(X)
 
+    # Derive archetype labels from the KMeans centroids (data-driven, not a
+    # hard-coded id->name guess). Profile each cluster by its mean per-90 feature
+    # vector, z-score across clusters, then match to the closest signature.
+    profile   = df.groupby("cluster_kmeans")[FEATURES].mean()
+    profile_z = (profile - profile.mean()) / profile.std(ddof=0).replace(0, 1)
+    labels    = label_clusters(profile_z)
+    df["archetype"] = df["cluster_kmeans"].map(labels)
+    logger.info("Cluster archetypes: %s", labels)
+
+    import json
+    with open(f"{output_dir}/cluster_labels.json", "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in labels.items()}, f, indent=2)
+
     # Persist artefacts
     joblib.dump(scaler, f"{output_dir}/scaler.pkl")
     joblib.dump(kmeans, f"{output_dir}/kmeans.pkl")
@@ -226,6 +285,7 @@ def run(conn, output_dir: str = "artifacts/model1") -> Dict[str, Any]:
         "scaler": scaler,
         "pca":    pca,
         "df":     df,
+        "labels": labels,
     }
 
 

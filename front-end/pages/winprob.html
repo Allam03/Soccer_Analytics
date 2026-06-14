@@ -22,6 +22,20 @@
   <div class="chart-wrap" style="height:220px"><canvas id="winProbChart"></canvas></div>
 </div>
 
+<div class="card mb-16">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div class="card-title" style="margin:0">Match xG Timeline — who created the better chances</div>
+    <select class="top-select" id="matchSelector" style="max-width:340px">
+      <option>Loading matches…</option>
+    </select>
+  </div>
+  <div class="chart-wrap mt-8" style="height:240px"><canvas id="matchTimelineChart"></canvas></div>
+  <p class="text-muted fs-11 mt-8" id="matchXgSummary">
+    Cumulative expected goals for each side over the 90 minutes. Diamonds mark
+    actual goals. Select a match above.
+  </p>
+</div>
+
 <div class="two-col">
   <div class="card">
     <div class="card-title">Key Input Factors</div>

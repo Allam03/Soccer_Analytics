@@ -42,7 +42,7 @@ const PassNetwork = {
             from the /api/team-cohesion response — or null/empty
             for the demo layout.
   ────────────────────────────────────────────────────────── */
-  init(edges) {
+  init(edges, nodes) {
     const svg = document.getElementById("passNetworkSvg");
     if (!svg) return;
 
@@ -50,12 +50,35 @@ const PassNetwork = {
       const W = svg.clientWidth  || 800;
       const H = svg.clientHeight || 320;
 
-      if (edges && edges.length > 0) {
+      if (nodes && nodes.length > 0 && edges && edges.length > 0) {
+        this._renderOnPitch(svg, W, H, nodes, edges);
+      } else if (edges && edges.length > 0) {
         this._renderFromEdges(svg, W, H, edges);
       } else {
         this._renderDemo(svg, W, H);
       }
     });
+  },
+
+  /* ──────────────────────────────────────────────────────────
+     _renderOnPitch
+     Place each node at its real average pitch position (StatsBomb
+     units: x 0-120 toward goal, y 0-80). The team attacks left->right.
+  ────────────────────────────────────────────────────────── */
+  _renderOnPitch(svg, W, H, apiNodes, edges) {
+    const maxVol = Math.max(...apiNodes.map(n => n.volume || 1), 1);
+    const nodes = {};
+    for (const n of apiNodes) {
+      nodes[n.name] = {
+        x:         n.x / 120,                  // 0..1 across the pitch
+        y:         n.y / 80,                    // 0..1 down the pitch
+        size:      8 + (n.volume / maxVol) * 14,
+        highlight: n.volume === maxVol,
+        label:     _initials(n.name),
+      };
+    }
+    const maxW = Math.max(...edges.map(e => e.weight || 1), 1);
+    this._render(svg, W, H, nodes, edges, maxW, /* pitch */ true);
   },
 
   /* ──────────────────────────────────────────────────────────
@@ -121,9 +144,11 @@ const PassNetwork = {
      nodes: {id -> {x, y, size, highlight, label}}
      edges: [{from, to, weight}]
   ────────────────────────────────────────────────────────── */
-  _render(svg, W, H, nodes, edges, maxW) {
-    // Convert relative (0-1) coords to pixels
-    const px = (n) => ({ x: n.x * W, y: n.y * H });
+  _render(svg, W, H, nodes, edges, maxW, pitch = false) {
+    // Convert relative (0-1) coords to pixels. On a pitch we inset by a margin
+    // so nodes near the touchlines aren't clipped.
+    const M = pitch ? 22 : 0;
+    const px = (n) => ({ x: M + n.x * (W - 2 * M), y: M + n.y * (H - 2 * M) });
 
     let html = `
       <defs>
@@ -136,9 +161,27 @@ const PassNetwork = {
           <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter>
       </defs>
-      <line x1="${W * 0.5}" y1="15" x2="${W * 0.5}" y2="${H - 15}"
-            stroke="rgba(99,225,180,0.08)" stroke-width="1" stroke-dasharray="6,4"/>
     `;
+
+    if (pitch) {
+      // Pitch markings (team attacks left -> right). Coords map StatsBomb
+      // 120x80 onto the inset drawing area.
+      const fx = (x) => M + (x / 120) * (W - 2 * M);
+      const fy = (y) => M + (y / 80)  * (H - 2 * M);
+      const ps = 'stroke="rgba(56,189,131,0.22)" stroke-width="1" fill="none"';
+      html += `
+        <rect x="${fx(0)}" y="${fy(0)}" width="${fx(120) - fx(0)}" height="${fy(80) - fy(0)}" ${ps}/>
+        <line x1="${fx(60)}" y1="${fy(0)}" x2="${fx(60)}" y2="${fy(80)}" ${ps}/>
+        <circle cx="${fx(60)}" cy="${fy(40)}" r="${(fy(50) - fy(40)).toFixed(1)}" ${ps}/>
+        <rect x="${fx(102)}" y="${fy(18)}" width="${fx(120) - fx(102)}" height="${fy(62) - fy(18)}" ${ps}/>
+        <rect x="${fx(0)}"   y="${fy(18)}" width="${fx(18) - fx(0)}"   height="${fy(62) - fy(18)}" ${ps}/>
+      `;
+    } else {
+      html += `
+        <line x1="${W * 0.5}" y1="15" x2="${W * 0.5}" y2="${H - 15}"
+              stroke="rgba(99,225,180,0.08)" stroke-width="1" stroke-dasharray="6,4"/>
+      `;
+    }
 
     // Edges
     for (const e of edges) {

@@ -8,6 +8,8 @@
    real script and executes it.
    ============================================================ */
 
+const ASSET_VERSION = "2.5.0";
+
 const PAGES = [
   { id: "dashboard-content", file: "/static/pages/dashboard.html" },
   { id: "player-content",    file: "/static/pages/player.html"    },
@@ -15,7 +17,7 @@ const PAGES = [
   { id: "xg-content",        file: "/static/pages/xg.html"        },
   { id: "winprob-content",   file: "/static/pages/winprob.html"   },
   { id: "debug-content",     file: "/static/pages/debug.html"     },
-];
+].map((p) => ({ ...p, file: `${p.file}?v=${ASSET_VERSION}` }));
 
 function runScripts(container) {
   // Find every <script> tag inside the injected HTML and re-execute it
