@@ -5,11 +5,22 @@ Model 1: Player Efficiency and Style Profiling
 Type: Unsupervised clustering
 Algorithms: KMeans, DBSCAN, GaussianMixture
 
-Objective: Classify players into tactical archetypes using per-match
-statistical fingerprints aggregated to player-season level.
+Objective: Classify players into tactical archetypes using statistical
+fingerprints aggregated to the player-team-season level.
 
-Features used
--------------
+Accuracy fixes vs the original
+------------------------------
+1. Per-90 normalisation. Raw per-match averages of counting stats are
+   dominated by minutes played and by zero-inflation (54-62% zeros in
+   shots/dribbles), which collapses the clusters (silhouette ~ 0.22-0.28).
+   Every counting feature is now expressed per 90 minutes
+   (SUM(stat) / SUM(minutes) * 90), removing the minutes confound.
+2. Goalkeepers are excluded from the outfield clustering -- their outfield
+   stat profile is degenerate (near-zero everywhere) and forms a trivial
+   cluster that inflates within-cluster homogeneity without meaning.
+
+Features used (all per-90)
+--------------------------
 passes_attempted, shots, tackles, interceptions, clearances,
 carry_distance, progressive_carries, key_passes, progressive_passes,
 pressures, dribbles_completed
@@ -43,6 +54,26 @@ FEATURES = [
     "dribbles_completed",
 ]
 
+def position_group(pos) -> str:
+    """
+    Map a StatsBomb position name (player_match_stats.starting_position, e.g.
+    'Left Center Back', 'Right Wing Back', 'Center Attacking Midfield',
+    'Center Forward') to a coarse role group. Keyword order matters: 'back'
+    is checked before 'wing' so wing-backs are defenders.
+    """
+    if not pos:
+        return "UNK"
+    p = pos.lower()
+    if "goalkeeper" in p:
+        return "GK"
+    if "back" in p:                       # full/centre/wing backs
+        return "DEF"
+    if "midfield" in p:                   # def / central / attacking midfield
+        return "MID"
+    if "wing" in p or "forward" in p or "striker" in p:
+        return "FWD"
+    return "UNK"
+
 ARCHETYPE_LABELS = {
     # Populated after fitting -- maps cluster id -> human-readable label.
     # Example: {0: "Defensive Midfielder", 1: "Wide Attacker", ...}
@@ -51,41 +82,53 @@ ARCHETYPE_LABELS = {
 
 def load_features(conn) -> pd.DataFrame:
     """
-    Pull per-player season averages from the DB.
+    Pull per-90 statistical fingerprints from the DB.
 
-    Returns one row per (player_id, season) with mean values for all
-    FEATURES, plus player_name and position for interpretability.
+    Returns one row per (player_id, team_id, season). Every counting feature
+    is normalised to per-90 minutes -- SUM(stat) / SUM(minutes) * 90 -- so the
+    fingerprint reflects playing style rather than how many minutes a player
+    accumulated. team_id is included so the serving layer can map a player to
+    their archetype directly. Position is the player's dominant
+    starting_position (StatsBomb), used only to drop goalkeepers.
     """
     query = """
         SELECT
             p.player_id,
             p.player_name,
-            p.position,
+            pms.team_id,
+            mode() WITHIN GROUP (ORDER BY pms.starting_position) AS position,
             m.season,
-            COUNT(pms.stat_id)                       AS matches_played,
-            AVG(pms.passes_attempted)                AS passes_attempted,
-            AVG(pms.shots)                           AS shots,
-            AVG(pms.tackles)                         AS tackles,
-            AVG(pms.interceptions)                   AS interceptions,
-            AVG(pms.clearances)                      AS clearances,
-            AVG(pms.carry_distance)                  AS carry_distance,
-            AVG(pms.progressive_carries)             AS progressive_carries,
-            AVG(pms.key_passes)                      AS key_passes,
-            AVG(pms.progressive_passes)              AS progressive_passes,
-            AVG(pms.pressures)                       AS pressures,
-            AVG(pms.dribbles_completed)              AS dribbles_completed
+            COUNT(pms.stat_id)              AS matches_played,
+            SUM(pms.minutes_played)         AS minutes_total,
+            SUM(pms.passes_attempted)::float    / NULLIF(SUM(pms.minutes_played),0) * 90 AS passes_attempted,
+            SUM(pms.shots)::float               / NULLIF(SUM(pms.minutes_played),0) * 90 AS shots,
+            SUM(pms.tackles)::float             / NULLIF(SUM(pms.minutes_played),0) * 90 AS tackles,
+            SUM(pms.interceptions)::float       / NULLIF(SUM(pms.minutes_played),0) * 90 AS interceptions,
+            SUM(pms.clearances)::float          / NULLIF(SUM(pms.minutes_played),0) * 90 AS clearances,
+            SUM(pms.carry_distance)::float      / NULLIF(SUM(pms.minutes_played),0) * 90 AS carry_distance,
+            SUM(pms.progressive_carries)::float / NULLIF(SUM(pms.minutes_played),0) * 90 AS progressive_carries,
+            SUM(pms.key_passes)::float          / NULLIF(SUM(pms.minutes_played),0) * 90 AS key_passes,
+            SUM(pms.progressive_passes)::float  / NULLIF(SUM(pms.minutes_played),0) * 90 AS progressive_passes,
+            SUM(pms.pressures)::float           / NULLIF(SUM(pms.minutes_played),0) * 90 AS pressures,
+            SUM(pms.dribbles_completed)::float  / NULLIF(SUM(pms.minutes_played),0) * 90 AS dribbles_completed
         FROM player_match_stats pms
         JOIN players p ON p.player_id = pms.player_id
         JOIN matches  m ON m.match_id  = pms.match_id
         WHERE pms.minutes_played >= 45
-        GROUP BY p.player_id, p.player_name, p.position, m.season
+        GROUP BY p.player_id, p.player_name, pms.team_id, m.season
         HAVING COUNT(pms.stat_id) >= 5
     """
     with conn.cursor() as cur:
         cur.execute(query)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=cols)
+    df = pd.DataFrame(rows, columns=cols)
+    if not df.empty:
+        df["position_group"] = df["position"].map(position_group)
+        # Goalkeepers have a degenerate outfield-stat profile -- exclude them
+        # from the archetype clustering.
+        df = df[df["position_group"] != "GK"].reset_index(drop=True)
+    return df
 
 
 def preprocess(df: pd.DataFrame) -> tuple[np.ndarray, StandardScaler]:
