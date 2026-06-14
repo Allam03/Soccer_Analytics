@@ -15,6 +15,7 @@ const PAGE_TITLES = {
   player:    "Player Efficiency & Style Profiling",
   xg:        "Shot Quality — Expected Goals (xG)",
   cohesion:  "Pass Networks (Tactical)",
+  injury:    "Injury Risk Prediction",
   winprob:   "Win Probability Modeling",
 };
 

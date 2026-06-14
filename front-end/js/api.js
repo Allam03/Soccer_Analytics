@@ -78,6 +78,10 @@ const ApiService = {
     return this.request(`/win-probability?team_id=${this.teamId}`);
   },
 
+  async loadInjury() {
+    return this.request(`/injury-risk?team_id=${this.teamId}`);
+  },
+
   async loadShotMap() {
     return this.request(`/shot-map?team_id=${this.teamId}`);
   },

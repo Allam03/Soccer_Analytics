@@ -138,6 +138,12 @@ def _load_all_artifacts() -> None:
         "shots": _parquet(a / "model_xg" / "shots_xg.parquet"),
         "model": _load(a / "model_xg" / "xg_model.pkl"),
     }
+    _A["m3"] = {
+        "xgb":    _load(a / "model3" / "xgb.pkl"),
+        "rf":     _load(a / "model3" / "rf.pkl"),
+        "scaler": _load(a / "model3" / "scaler.pkl"),
+        "df":     _parquet(a / "model3" / "features.parquet"),
+    }
     loaded = sum(1 for m in _A.values() for v in m.values() if v is not None)
     total  = sum(len(m) for m in _A.values())
     logger.info("Artifacts: %d / %d objects loaded", loaded, total)
@@ -279,7 +285,7 @@ def health() -> dict[str, Any]:
     if db_reachable:
         for tbl in (
             "teams", "players", "matches", "stadiums",
-            "player_match_stats", "shots",
+            "player_match_stats", "shots", "injuries", "player_match_features",
             "pass_network_edges", "match_minute_snapshots",
         ):
             table_counts[tbl] = _table_count(tbl)
@@ -1097,6 +1103,96 @@ def match_xg_timeline(match_id: int) -> dict[str, Any]:
         "home_goals": home_goals, "away_goals": away_goals,
         "source": "database+artifact" if xgp else "database",
     }
+
+
+# =============================================================================
+# /api/injury-risk   (Model 3: injury risk, XGBoost on workload/recovery)
+# =============================================================================
+
+def _injury_response(players: list, source: str) -> dict[str, Any]:
+    high = sum(1 for p in players if p["risk_score"] >= 0.67)
+    med  = sum(1 for p in players if 0.4 <= p["risk_score"] < 0.67)
+    low  = len(players) - high - med
+    return {
+        "kpi": {
+            "high": high, "medium": med, "low": low,
+            "avg_score": round(sum(p["risk_score"] for p in players) / len(players), 2),
+        },
+        "players": players,
+        "source":  source,
+    }
+
+
+@app.get("/api/injury-risk")
+def injury_risk(team_id: int) -> dict[str, Any]:
+    _validate_team_id(team_id)
+
+    m3     = _A.get("m3", {})
+    model  = m3.get("xgb") or m3.get("rf")
+    scaler = m3.get("scaler")
+
+    FEATURES = [
+        "minutes_played", "matches_last_30_days", "minutes_last_30_days",
+        "days_since_last_injury", "age_at_match", "sub_minute_flag",
+        "xg", "xa", "pressures", "tackles", "carry_distance",
+        "interceptions", "clearances",
+    ]
+
+    try:
+        rows = _query(
+            """
+            SELECT p.player_name,
+                   COALESCE(
+                       mode() WITHIN GROUP (ORDER BY pms.starting_position), '-'
+                   ) AS position,
+                   AVG(pms.minutes_played)                       AS minutes_played,
+                   AVG(COALESCE(pmf.matches_last_30_days, 0))    AS matches_last_30_days,
+                   AVG(COALESCE(pmf.minutes_last_30_days, 0))    AS minutes_last_30_days,
+                   AVG(COALESCE(pmf.days_since_last_injury, -1)) AS days_since_last_injury,
+                   MAX(CASE WHEN pms.sub_minute IS NOT NULL THEN 1 ELSE 0 END) AS sub_minute_flag,
+                   AVG(pms.xg) AS xg, AVG(pms.xa) AS xa,
+                   AVG(pms.pressures) AS pressures, AVG(pms.tackles) AS tackles,
+                   AVG(pms.carry_distance) AS carry_distance,
+                   AVG(pms.interceptions) AS interceptions,
+                   AVG(pms.clearances) AS clearances,
+                   AVG(COALESCE(
+                       EXTRACT(YEAR FROM AGE(m.match_date, p.date_of_birth))::INT, 25
+                   )) AS age_at_match
+            FROM player_match_stats pms
+            JOIN player_match_features pmf ON pmf.stat_id  = pms.stat_id
+            JOIN players p                 ON p.player_id  = pms.player_id
+            JOIN matches  m                ON m.match_id   = pms.match_id
+            WHERE pms.team_id = %s
+            GROUP BY p.player_id, p.player_name
+            HAVING COUNT(*) >= 3
+            ORDER BY AVG(pms.minutes_played) DESC
+            LIMIT 15
+            """,
+            (team_id,),
+        )
+    except Exception as exc:
+        logger.warning("/api/injury-risk team=%d query error: %s", team_id, exc)
+        _last_errors["injury_risk"] = str(exc)
+        rows = []
+
+    if rows and model is not None and scaler is not None:
+        X = np.array([[float(r.get(f) or 0) for f in FEATURES] for r in rows])
+        probs = model.predict_proba(scaler.transform(X))[:, 1]
+        players_out = [
+            {
+                "player_name":            r["player_name"],
+                "position":               r.get("position") or "-",
+                "workload_30d":           int(r.get("minutes_last_30_days") or 0),
+                "days_since_last_injury": int(r.get("days_since_last_injury") or 0),
+                "risk_score":             round(float(prob), 2),
+            }
+            for r, prob in zip(rows, probs)
+        ]
+        players_out.sort(key=lambda p: p["risk_score"], reverse=True)
+        return _injury_response(players_out, "database+model3")
+
+    logger.warning("/api/injury-risk team=%d: artifact/data unavailable", team_id)
+    return {"kpi": {}, "players": [], "source": "fallback"}
 
 
 # =============================================================================

@@ -18,11 +18,11 @@
   />
 
   <!-- CSS load order matters: tokens → reset → layout → components → pages -->
-  <link rel="stylesheet" href="/static/css/variables.css?v=2.5.0" />
-  <link rel="stylesheet" href="/static/css/reset.css?v=2.5.0" />
-  <link rel="stylesheet" href="/static/css/layout.css?v=2.5.0" />
-  <link rel="stylesheet" href="/static/css/components.css?v=2.5.0" />
-  <link rel="stylesheet" href="/static/css/pages.css?v=2.5.0" />
+  <link rel="stylesheet" href="/static/css/variables.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/reset.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/layout.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/components.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/pages.css?v=2.6.0" />
 
   <!-- Must load synchronously BEFORE the body scripts: charts.js references
        Chart.defaults at the top level. With `defer` it would run after the
@@ -66,6 +66,10 @@
         <span class="nav-icon">🕸️</span>
         <span>Pass Networks</span>
       </div>
+      <div class="nav-item" data-page="injury">
+        <span class="nav-icon">🏥</span>
+        <span>Injury Risk</span>
+      </div>
       <div class="nav-item" data-page="winprob">
         <span class="nav-icon">📈</span>
         <span>Win Probability</span>
@@ -79,8 +83,9 @@
     </nav>
 
     <div class="sidebar-footer">
-      <div class="data-sources-label">Data Source</div>
+      <div class="data-sources-label">Data Sources</div>
       <div class="data-source"><div class="ds-dot"></div><span>StatsBomb (event data)</span></div>
+      <div class="data-source"><div class="ds-dot"></div><span>Transfermarkt (injuries)</span></div>
       <div class="data-sources-label" style="margin-top:12px">Scope</div>
       <div class="data-source" style="line-height:1.4">
         <span style="font-size:10px;color:var(--text-secondary)">
@@ -142,6 +147,10 @@
         <div id="cohesion-content"></div>
       </div>
 
+      <div class="page" id="page-injury">
+        <div id="injury-content"></div>
+      </div>
+
       <div class="page" id="page-winprob">
         <div id="winprob-content"></div>
       </div>
@@ -167,12 +176,12 @@
   6. pageLoader.js  — async HTML injection; sets window.pagesLoadedPromise
                       main.js awaits this before rendering anything
 -->
-<script src="/static/js/charts.js?v=2.5.0"></script>
-<script src="/static/js/passNetwork.js?v=2.5.0"></script>
-<script src="/static/js/navigation.js?v=2.5.0"></script>
-<script src="/static/js/api.js?v=2.5.0"></script>
-<script src="/static/js/main.js?v=2.5.0"></script>
-<script src="/static/js/pageLoader.js?v=2.5.0"></script>
+<script src="/static/js/charts.js?v=2.6.0"></script>
+<script src="/static/js/passNetwork.js?v=2.6.0"></script>
+<script src="/static/js/navigation.js?v=2.6.0"></script>
+<script src="/static/js/api.js?v=2.6.0"></script>
+<script src="/static/js/main.js?v=2.6.0"></script>
+<script src="/static/js/pageLoader.js?v=2.6.0"></script>
 
 </body>
 </html>

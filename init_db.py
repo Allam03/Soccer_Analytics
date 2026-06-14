@@ -34,7 +34,8 @@ def verify(conn):
     logger.info("Tables: %s", tables)
     missing = {
         "matches", "pass_network_edges", "match_minute_snapshots",
-        "player_match_stats", "players", "teams", "stadiums", "shots",
+        "player_match_stats", "player_match_features", "injuries",
+        "players", "teams", "stadiums", "shots",
     } - set(tables)
     if missing:
         logger.error("Missing tables: %s", missing)

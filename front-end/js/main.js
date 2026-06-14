@@ -21,6 +21,7 @@ const AppState = {
   cohesion:  null,
   xg:        null,
   winprob:   null,
+  injury:    null,
 };
 
 const _pendingRender = new Set();
@@ -109,7 +110,7 @@ async function refreshAllData() {
 
   document.querySelectorAll(".kpi-value").forEach((el) => el.classList.add("shimmer"));
 
-  ["dashboard", "player", "cohesion", "xg", "winprob"].forEach(
+  ["dashboard", "player", "cohesion", "xg", "winprob", "injury"].forEach(
     (p) => _pendingRender.add(p)
   );
 
@@ -125,13 +126,14 @@ async function refreshAllData() {
     () => ApiService.loadShotMap(),
     () => ApiService.loadLeagueXG(),
     () => ApiService.loadMatches(),
+    () => ApiService.loadInjury(),
   ].map((fn) => Promise.resolve().then(fn)));
 
   const [dashRes, playerRes, cohesionRes, xgRes, winprobRes,
-         shotmapRes, leagueRes, matchesRes] = results;
+         shotmapRes, leagueRes, matchesRes, injuryRes] = results;
 
   const labels = ["dashboard", "player", "cohesion", "xg", "winprob",
-                  "shotmap", "leaguexg", "matches"];
+                  "shotmap", "leaguexg", "matches", "injury"];
   results.forEach((r, i) => {
     if (r.status === "rejected") {
       console.error(`[refreshAllData] ${labels[i]} fetch failed:`, r.reason);
@@ -148,6 +150,7 @@ async function refreshAllData() {
   AppState.shotmap   = shotmapRes.status  === "fulfilled" ? shotmapRes.value  : null;
   AppState.leaguexg  = leagueRes.status   === "fulfilled" ? leagueRes.value   : null;
   AppState.matches   = matchesRes.status  === "fulfilled" ? matchesRes.value  : null;
+  AppState.injury    = injuryRes.status   === "fulfilled" ? injuryRes.value   : null;
 
   const activePage = document.querySelector(".page.active")?.id?.replace("page-", "") || "dashboard";
   debug("Active page is:", activePage);
@@ -201,6 +204,7 @@ function renderPage(pageId) {
     case "cohesion":  _safeRender(renderCohesion,  "cohesion");  break;
     case "xg":        _safeRender(renderXG,        "xg");        break;
     case "winprob":   _safeRender(renderWinProb,   "winprob");   break;
+    case "injury":    _safeRender(renderInjury,    "injury");    break;
     default: debug("Unknown pageId:", pageId);
   }
 }
@@ -587,6 +591,70 @@ function renderWinProb() {
   }
 
   _initMatchSelector();
+}
+
+// ---------------------------------------------------------------------------
+// renderInjury  (Model 3: injury risk)
+// ---------------------------------------------------------------------------
+
+function renderInjury() {
+  const data = AppState.injury;
+  if (!data) {
+    showPageError("injury", "Injury risk data unavailable");
+    return;
+  }
+  debug("renderInjury(), source=", data.source, "players=", data.players?.length);
+
+  const kpi    = data.kpi || {};
+  const values = document.querySelectorAll("#page-injury .kpi-value");
+  if (values[0]) values[0].textContent = String(kpi.high   || 0);
+  if (values[1]) values[1].textContent = String(kpi.medium || 0);
+  if (values[2]) values[2].textContent = String(kpi.low    || 0);
+  if (values[3]) values[3].textContent = (kpi.avg_score || 0).toFixed(2);
+
+  renderInjuryRiskTable();
+  requestAnimationFrame(() => {
+    Charts.initInjuryHistory(data.players || []);
+  });
+}
+
+function renderInjuryRiskTable() {
+  const tbody   = document.querySelector("#page-injury .data-table tbody");
+  const players = AppState.injury?.players;
+  if (!tbody) {
+    debug("renderInjuryRiskTable: tbody not found");
+    return;
+  }
+  if (!players?.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No data</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = players.map((p) => {
+    const score = Number(p.risk_score || 0);
+    const pct   = Math.round(score * 100);
+    const meta  = getRiskMeta(score);
+    const barColor       = score >= 0.67 ? "var(--red)" : score >= 0.4 ? "var(--amber)" : "var(--accent)";
+    const recommendation = score >= 0.67 ? "Rest advised" : score >= 0.4 ? "Reduce load" : "Proceed normally";
+    return `
+      <tr>
+        <td class="fw-700">${p.player_name}</td>
+        <td>${p.position || "-"}</td>
+        <td>
+          <div class="risk-score-bar">
+            <div class="risk-bar">
+              <div class="risk-bar-fill" style="width:${pct}%;background:${barColor}"></div>
+            </div>
+            <span class="fs-12" style="width:30px">${score.toFixed(2)}</span>
+          </div>
+        </td>
+        <td><span class="badge ${meta.badgeClass}">${meta.label.replace(" Risk", "")}</span></td>
+        <td>${Number(p.workload_30d || 0)} min</td>
+        <td>${Number(p.days_since_last_injury || 0)} days ago</td>
+        <td class="text-muted fs-12">${recommendation}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
 // ---------------------------------------------------------------------------

@@ -41,10 +41,23 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "player_name":   "text",
             "norm_name":     "text",
             "sb_player_id":  "integer",
+            "tm_player_id":  "integer",
+            "nationality":   "text",
+            "position":      "text",
+            "date_of_birth": "date",
         },
         "stadiums": {
             "stadium_id":   "integer",
             "stadium_name": "text",
+        },
+        "injuries": {
+            "injury_id":     "integer",
+            "player_id":     "integer",
+            "injury_type":   "text",
+            "injury_date":   "date",
+            "return_date":   "date",
+            "matches_missed":"integer",
+            "season":        "text",
         },
         "matches": {
             "match_id":     "integer",
@@ -86,6 +99,16 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
             "minutes_played":    "integer",
             "starting_position":  "text",
             "sub_minute":        "integer",
+        },
+        "player_match_features": {
+            "feature_id":            "integer",
+            "stat_id":               "integer",
+            "player_id":             "integer",
+            "match_id":              "integer",
+            "matches_last_30_days":  "integer",
+            "minutes_last_30_days":  "integer",
+            "days_since_last_injury":"integer",
+            "is_injured_next_30d":   "boolean",
         },
         "shots": {
             "shot_id":             "integer",
@@ -142,17 +165,18 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
     stale = {
         "teams":              {"country"},
         "matches":            {"stadium_name", "stadium_lat", "stadium_lng"},
-        "players":            {"tm_player_id", "nationality", "position", "date_of_birth"},
         "stadiums":           {"stadium_lat", "stadium_lng"},
         "player_match_stats": {"weather_id"},
     }
 
-    # Tables that were removed entirely (StatsBomb-only platform).
-    stale_tables = {"weather", "injuries", "player_match_features"}
+    # Tables that were removed entirely (weather / Open-Meteo).
+    stale_tables = {"weather"}
 
     # UNIQUE constraints: table -> minimum expected count.
     unique_constraints = {
         "player_match_stats":    1,   # (player_id, match_id)
+        "player_match_features": 2,   # (stat_id) + (player_id, match_id)
+        "injuries":              1,   # (player_id, injury_date, injury_type)
         "pass_network_edges":    1,   # (match_id, team_id, passer_id, receiver_id)
         "match_minute_snapshots": 1,
         "shots":                 1,   # (sb_event_id)
@@ -228,6 +252,10 @@ def validate_schema(conn) -> Tuple[bool, List[str], List[str]]:
                 ("player_match_stats",    "player_id", "players",            "player_id"),
                 ("player_match_stats",    "match_id",  "matches",            "match_id"),
                 ("player_match_stats",    "team_id",   "teams",              "team_id"),
+                ("player_match_features", "stat_id",   "player_match_stats", "stat_id"),
+                ("player_match_features", "player_id", "players",            "player_id"),
+                ("player_match_features", "match_id",  "matches",            "match_id"),
+                ("injuries",              "player_id", "players",            "player_id"),
                 ("matches",               "stadium_id","stadiums",           "stadium_id"),
                 ("pass_network_edges",    "match_id",  "matches",            "match_id"),
                 ("shots",                 "match_id",  "matches",            "match_id"),
