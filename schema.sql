@@ -246,6 +246,48 @@ CREATE INDEX IF NOT EXISTS idx_pne_team  ON pass_network_edges (match_id, team_i
 
 
 -- -----------------------------------------------------------------------------
+-- shots: one row per Shot event, with geometry, context and freeze-frame
+-- derived features. Powers the from-scratch xG model and shot maps.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS shots (
+    shot_id              SERIAL  PRIMARY KEY,
+    sb_event_id          TEXT    UNIQUE NOT NULL,   -- StatsBomb event uuid
+    match_id             INT     NOT NULL REFERENCES matches (match_id) ON DELETE CASCADE,
+    player_id            INT              REFERENCES players (player_id),
+    team_id              INT              REFERENCES teams   (team_id),
+    minute               INT,
+
+    -- geometry
+    x                    FLOAT,   -- shot location (StatsBomb 120x80 pitch)
+    y                    FLOAT,
+    distance             FLOAT,   -- metres to goal centre
+    angle                FLOAT,   -- radians subtended by the goal mouth
+
+    -- context (categorical)
+    body_part            TEXT,    -- Right Foot / Left Foot / Head / Other
+    shot_type            TEXT,    -- Open Play / Free Kick / Penalty / Corner ...
+    technique            TEXT,
+    play_pattern         TEXT,
+    under_pressure       BOOLEAN,
+    first_time           BOOLEAN,
+
+    -- freeze-frame derived
+    defenders_in_cone    INT,     -- opponents inside the shot->goalposts triangle
+    dist_to_nearest_def  FLOAT,
+    gk_dist_to_goal      FLOAT,   -- keeper distance from goal centre
+    gk_dist_to_shot      FLOAT,
+
+    -- benchmark + label
+    statsbomb_xg         FLOAT,   -- StatsBomb's own xG (validation benchmark only)
+    is_goal              BOOLEAN NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shots_match  ON shots (match_id);
+CREATE INDEX IF NOT EXISTS idx_shots_player ON shots (player_id);
+CREATE INDEX IF NOT EXISTS idx_shots_team   ON shots (team_id);
+
+
+-- -----------------------------------------------------------------------------
 -- VIEW: player age at time of match
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW v_player_match_age AS
