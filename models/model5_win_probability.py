@@ -4,13 +4,16 @@ models/model5_win_probability.py
 Model 5: Win Probability Modeling
 Type: Multiclass classification  (win / draw / loss)
 
-Fix: data leakage in cross-validation (same issue as model3).
-StandardScaler was fit on the full dataset before cross_val_score in both
-sub-models A and B, allowing test-fold statistics to influence the scaler.
-Both are now wrapped in Pipelines so the scaler is fit only on training
-folds during CV. The final scaler fit on the full dataset for inference
-is unchanged, and artifacts are saved in the same format api_server.py
-expects (separate .pkl files for scaler and estimator).
+Honest evaluation:
+  * The dataset is now the complete 2015/16 season of all five major European
+    leagues plus the men's international tournaments, so it is balanced across
+    ~100 clubs and 50+ nations -- no single-team prior to lean on.
+  * Cross-validation uses StratifiedGroupKFold grouped by match_id. A shuffled
+    split leaks badly here because the two team-rows of a match (5A) and all
+    ~90 minute-rows of a match (5B) share the same label and form features.
+  * A held-out season (FIFA World Cup 2022) gives an out-of-time test.
+  * Scalers stay inside Pipelines during CV; artifacts are still saved as
+    separate scaler/estimator .pkl files in the format api_server.py expects.
 """
 
 import logging
@@ -21,8 +24,9 @@ import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, cross_val_score
 import joblib
+
+from models.eval_utils import attach_season, grouped_cv, holdout_season, TEST_SEASON
 
 logger = logging.getLogger(__name__)
 
@@ -226,25 +230,30 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
     # ── Sub-model A: pre-match ──────────────────────────────────────────────
     logger.info("Model 5A: loading pre-match features ...")
     df_pre = load_features(conn)
+    df_pre = attach_season(df_pre, conn)
 
     if not df_pre.empty:
         logger.info("  %d team-match rows", len(df_pre))
         X_pre = df_pre[FEATURES_PRE_MATCH].fillna(0).values
         y_pre = encode_labels(df_pre)
+        groups  = df_pre["match_id"].values
+        seasons = df_pre["season"].values
 
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-        # Pipeline prevents test-fold data from influencing the scaler
-        # during cross-validation.
+        # Pipeline keeps the scaler isolated to training folds; GroupKFold by
+        # match prevents the two team-rows of a match leaking across folds.
         gbc_pipe_pre = Pipeline([
             ("scaler", StandardScaler()),
             ("clf", GradientBoostingClassifier(
                 n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
             )),
         ])
-        acc = cross_val_score(gbc_pipe_pre, X_pre, y_pre, cv=cv, scoring="accuracy")
-        logger.info("Pre-match GBC accuracy (5-fold): %.3f +/- %.3f",
-                    acc.mean(), acc.std())
+        m, s = grouped_cv(gbc_pipe_pre, X_pre, y_pre, groups, "accuracy", stratified=True)
+        naive = np.bincount(y_pre).max() / len(y_pre)
+        logger.info("Pre-match accuracy (StratifiedGroupKFold): %.3f +/- %.3f "
+                    "(naive majority=%.3f, lift=%+.3f)", m, s, naive, m - naive)
+        ho, n = holdout_season(gbc_pipe_pre, X_pre, y_pre, seasons, "accuracy")
+        if ho is not None:
+            logger.info("Pre-match accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, ho)
         gbc_pipe_pre.fit(X_pre, y_pre)
 
         # Save scaler and estimator separately so api_server.py can call
@@ -265,14 +274,15 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
     # ── Sub-model B: in-game ────────────────────────────────────────────────
     logger.info("Model 5B: loading in-game features ...")
     df_ig = load_in_game_features(conn)
+    df_ig = attach_season(df_ig, conn)
 
     if not df_ig.empty and df_ig["result"].notna().any():
         logger.info("  %d team-minute rows", len(df_ig))
         df_ig = df_ig.dropna(subset=["result"])
         X_ig  = df_ig[FEATURES_IN_GAME].fillna(0).values
         y_ig  = encode_labels(df_ig)
-
-        cv_ig = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        groups_ig  = df_ig["match_id"].values
+        seasons_ig = df_ig["season"].values
 
         gbc_pipe_ig = Pipeline([
             ("scaler", StandardScaler()),
@@ -280,10 +290,17 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
                 n_estimators=300, max_depth=5, learning_rate=0.05, random_state=42
             )),
         ])
-        acc_ig = cross_val_score(gbc_pipe_ig, X_ig, y_ig,
-                                 cv=cv_ig, scoring="accuracy")
-        logger.info("In-game GBC accuracy (5-fold): %.3f +/- %.3f",
-                    acc_ig.mean(), acc_ig.std())
+        # GroupKFold by match is essential here: all ~90 minute-rows of a match
+        # share the same final-result label and identical rolling-form features,
+        # so a shuffled split lets the model memorise matches (0.89 shuffled vs
+        # ~0.64 grouped).
+        m, s = grouped_cv(gbc_pipe_ig, X_ig, y_ig, groups_ig, "accuracy", stratified=True)
+        naive = np.bincount(y_ig).max() / len(y_ig)
+        logger.info("In-game accuracy (StratifiedGroupKFold by match): %.3f +/- %.3f "
+                    "(naive majority=%.3f)", m, s, naive)
+        ho, n = holdout_season(gbc_pipe_ig, X_ig, y_ig, seasons_ig, "accuracy")
+        if ho is not None:
+            logger.info("In-game accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, ho)
         gbc_pipe_ig.fit(X_ig, y_ig)
 
         gbc_ig    = gbc_pipe_ig.named_steps["clf"]
