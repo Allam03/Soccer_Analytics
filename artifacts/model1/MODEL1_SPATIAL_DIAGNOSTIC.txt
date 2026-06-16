@@ -1,0 +1,90 @@
+======================================================================
+MODEL 1 — SPATIAL CLUSTERING DIAGNOSTIC REPORT
+======================================================================
+
+Dataset: 4,112 player-season rows | 3,212 unique players
+Goalkeepers: EXCLUDED (diagnostic phase)
+Min total passes filter: 10
+
+──────────────────────────────────────────────────────────────────────
+K SWEEP  (K = 5 → 13,  k-means++, 10 runs each)
+──────────────────────────────────────────────────────────────────────
+
+Set A: (x_start, y_start)
+    K    Silhouette    Davies-Bouldin     Calinski-Harabasz
+  ---  ------------  ----------------  --------------------
+    5        0.4109            0.7796                3435.9
+    6        0.4386            0.6924                3785.5
+    7        0.4303            0.7336                3992.3
+    8        0.4356            0.7447                4136.4 ◄ best
+    9        0.4084            0.7988                4098.1 [K=9]
+   10        0.4192            0.7186                4111.5
+   11        0.4028            0.7725                4016.2
+   12        0.3868            0.8193                3971.6
+   13        0.3761            0.8392                3932.4
+  → Best K for this set: 8
+
+Set B: (x_start, y_start, x_end, y_end)
+    K    Silhouette    Davies-Bouldin     Calinski-Harabasz
+  ---  ------------  ----------------  --------------------
+    5        0.3843            0.8218                3237.5
+    6        0.4057            0.7564                3408.8 ◄ best
+    7        0.3886            0.8090                3505.2
+    8        0.3920            0.8284                3528.3
+    9        0.3770            0.8577                3469.4 [K=9]
+   10        0.3763            0.7934                3427.8
+   11        0.3617            0.8415                3327.0
+   12        0.3495            0.8730                3270.1
+   13        0.3306            0.9076                3198.2
+  → Best K for this set: 6
+
+──────────────────────────────────────────────────────────────────────
+INITIALIZATION TEST  (K=9, 10 runs each)
+──────────────────────────────────────────────────────────────────────
+  k-means++        best_sil=0.4123  mean=0.4078  std=0.0042  (10 runs)
+  random           best_sil=0.4190  mean=0.4060  std=0.0177  (10 runs)
+  manual_seeds     best_sil=0.4097  mean=0.4097  std=0.0000  (1 run)
+
+──────────────────────────────────────────────────────────────────────
+CENTROID DRIFT  (manual seeds → final centroids, raw pitch coords)
+──────────────────────────────────────────────────────────────────────
+  Cluster                        Seed(x,y)      Final(x,y)     Drift
+  ------------------------  --------------  --------------  --------
+  Goalkeeper                ( 10.0, 40.0)  ( 62.2, 68.1)    59.294
+  Left Center Back          ( 25.0, 55.0)  ( 42.3, 47.8)    18.694
+  Right Center Back         ( 25.0, 25.0)  ( 43.1, 26.3)    18.115
+  Left Wide Defender        ( 30.0, 70.0)  ( 47.3, 59.0)    20.499
+  Right Wide Defender       ( 30.0, 10.0)  ( 61.2, 11.2)    31.276
+  Defensive Midfielder      ( 55.0, 40.0)  ( 60.1, 39.8)     5.140
+  Advanced Midfielder       ( 80.0, 40.0)  ( 74.3, 40.2)     5.742
+  Left Attacker             ( 95.0, 65.0)  ( 75.5, 57.2)    21.007
+  Right Attacker            ( 95.0, 15.0)  ( 74.3, 23.8)    22.466
+
+  Mean drift : 22.470
+  Max drift  : 59.294
+  (Cluster with max drift: Goalkeeper)
+
+──────────────────────────────────────────────────────────────────────
+DECISIONS
+──────────────────────────────────────────────────────────────────────
+
+  Spatial K         : 8
+  Reason            : K=9 sil=0.4084 is below 5% threshold (0.4167) → USE BEST K=8
+
+  Feature Set       : A
+  Reason            : Set A sil=0.4356 sufficient (Set B=0.3920) → USE SET A
+
+  Init Method       : k-means++
+  Reason            : k-means++ sil=0.4123 > manual sil=0.4097 → USE K-MEANS++
+
+──────────────────────────────────────────────────────────────────────
+RECOMMENDATIONS FOR PRODUCTION
+──────────────────────────────────────────────────────────────────────
+
+  FIX K=9            : NO — use K=8
+  USE avg_x_end/y_end: NO — Set A (x,y) only is sufficient
+  INIT METHOD        : k-means++
+
+======================================================================
+END OF DIAGNOSTIC REPORT
+======================================================================

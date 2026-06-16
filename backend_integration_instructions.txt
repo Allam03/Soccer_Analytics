@@ -1,0 +1,64 @@
+MODEL 1 — BACKEND INTEGRATION INSTRUCTIONS
+==========================================
+
+
+WHAT THE MODEL PRODUCES
+-----------------------
+The pipeline outputs one file: artifacts/model1/player_clusters.parquet
+Every row is a player-season.
+
+Columns you need:
+
+  player_id               — join key to your players table
+  player_name             — display name
+  season                  — e.g. "2022" or "2015/2016"
+  primary_style           — e.g. "Deep Playmaker"
+  secondary_style         — e.g. "Box-to-Box" — empty string if none
+  spatial_cluster_name    — e.g. "Left Wide Defender"
+  final_player_archetype  — combined display label e.g. "Deep Playmaker · Box-to-Box · Left Wide Defender"
+  probability_vector      — JSON string of style probabilities per cluster (use for confidence breakdown UI)
+  xg_90, xa_90, shots_90, goals_90, passes_90, pass_accuracy,
+  carries_90, touches_90, progressive_actions_90,
+  tackles_90, interceptions_90, pressures_90
+                          — the 12 per-90 stats used for styling
+
+
+HOW TO SERVE IT
+---------------
+The parquet is pre-computed. Do NOT re-run the model on request.
+Two options:
+
+  Option 1 — Load parquet at startup
+    Read it into memory once when the API starts, query it in-process.
+    Fast, zero DB overhead.
+
+  Option 2 — Write to a DB table
+    After each pipeline run:  df.to_sql('player_clusters', engine)
+    Serve from there. Better if you want SQL joins with other tables.
+
+
+ENDPOINTS YOU WILL LIKELY NEED
+-------------------------------
+  GET /players/{player_id}/profile     — return that player's rows across all seasons
+  GET /players/search?name=Salah       — fuzzy name filter
+  GET /clusters/spatial?zone=Left+Wide+Defender   — all players in a given zone
+  GET /clusters/style?style=Deep+Playmaker        — all players of a given primary style
+
+
+WHEN DOES THE DATA UPDATE
+--------------------------
+The pipeline is run manually:
+  python -m models.model1_player_clustering
+
+Each run overwrites the parquet and the report at artifacts/model1/model1_report.txt
+After each pipeline run, reload the parquet (or re-ingest to DB).
+There is no live inference — everything is batch.
+
+
+GOTCHA — SEASON FORMAT
+-----------------------
+The season column is a string but the format is inconsistent:
+  some rows:  "2022"
+  some rows:  "2015/2016"
+Always treat season as a string. Never cast to int.
+Filter with exact string match:  WHERE season = '2022'

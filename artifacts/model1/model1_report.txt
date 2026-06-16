@@ -1,0 +1,87 @@
+=================================================================
+MODEL 1 — DUAL-AXIS PLAYER CLUSTERING  v4.0
+=================================================================
+
+Rows loaded : 3,854  |  Players: 3,072
+GKs         : 268  |  Outfield: 3,586
+
+── Spatial clustering ──────────────────────────────────────
+  K = 9  |  sil=0.4836  db=0.6543  ch=5636.0
+  Zone assignments:
+    0: Left Center Back             n=  296  centroid=(43.5,27.0)
+    1: Right Center Back            n=  353  centroid=(43.8,51.7)
+    2: Advanced Midfielder          n=  796  centroid=(74.1,40.4)
+    3: Right Attacker               n=  337  centroid=(72.9,55.6)
+    4: Left Wide Defender           n=  347  centroid=(61.7,10.7)
+    5: Goalkeeper                   n=  268  centroid=(12.2,40.7)
+    6: Defensive Midfielder         n=  755  centroid=(59.4,39.8)
+    7: Right Wide Defender          n=  326  centroid=(61.5,68.6)
+    8: Left Attacker                n=  376  centroid=(72.7,25.9)
+
+── Spatial external validation (vs StatsBomb modal_position) ───────
+  n evaluated              : 3,854
+  Adjusted Rand Index      : 0.4010
+  Normalized Mutual Info   : 0.5236
+  L/R side-accuracy        : 0.9644  (n=1,880)
+  Per-zone purity:
+    Advanced Midfielder     n= 796  top='Center Forward' (38%)
+    Defensive Midfielder    n= 755  top='Left Defensive Midfield' (21%)
+    Goalkeeper              n= 268  top='Goalkeeper' (100%)
+    Left Attacker           n= 376  top='Left Wing' (36%)
+    Left Center Back        n= 296  top='Left Center Back' (90%)
+    Left Wide Defender      n= 347  top='Left Back' (75%)
+    Right Attacker          n= 337  top='Right Wing' (37%)
+    Right Center Back       n= 353  top='Right Center Back' (80%)
+    Right Wide Defender     n= 326  top='Right Back' (75%)
+
+── Style clustering (GMM) ──────────────────────────────────
+  Chosen K = 10  |  BIC = 18067.4
+  Players with secondary style (>=20%): 536
+  BIC sweep:
+    k=4  BIC=20346.7  AIC=18101.6  OK
+    k=5  BIC=21035.8  AIC=18227.9  OK
+    k=6  BIC=18444.1  AIC=15073.4  OK
+    k=7  BIC=18497.1  AIC=14563.5  OK
+    k=8  BIC=18714.3  AIC=14217.9  OK
+    k=9  BIC=19116.4  AIC=14057.3  OK
+    k=10  BIC=18067.4  AIC=12445.5  OK <-- chosen
+
+  Style cluster breakdown:
+    Box-to-Box                       815  (22.7%)
+    Deep Playmaker                   640  (17.8%)
+    Carrier                          438  (12.2%)
+    Clinical Finisher                398  (11.1%)
+    High Press                       378  (10.5%)
+    Ball Winner                      295  (8.2%)
+    All-Rounder                      180  (5.0%)
+    Defensive Mid                    179  (5.0%)
+    Pure Striker                     142  (4.0%)
+    Chance Creator                   121  (3.4%)
+
+  Posterior confidence (outfield):
+    Mean max-posterior      : 0.915
+    Median max-posterior    : 0.983
+    Frac confident (>=0.80) : 0.839
+    Mean entropy            : 0.215 nats  (max=2.303)
+
+── Final archetype distribution (top 20) ────────────────────
+  Goalkeeper                                           268
+  Clinical Finisher · Advanced Midfielder              262
+  Box-to-Box · Defensive Midfielder                    191
+  Carrier · Advanced Midfielder                        166
+  Deep Playmaker · Defensive Midfielder                144
+  Box-to-Box · Right Center Back                       135
+  Box-to-Box · Left Center Back                        113
+  Box-to-Box · Right Wide Defender                     112
+  Box-to-Box · Left Wide Defender                      105
+  Ball Winner · Right Center Back                       99
+  Deep Playmaker · Left Wide Defender                   97
+  High Press · Advanced Midfielder                      92
+  Deep Playmaker · Right Wide Defender                  80
+  High Press · Left Attacker                            79
+  Carrier · Right Attacker                              76
+  Ball Winner · Left Center Back                        75
+  High Press · Right Attacker                           68
+  Carrier · Left Attacker                               66
+  Pure Striker · Advanced Midfielder                    65
+  Defensive Mid · Defensive Midfielder                  61
