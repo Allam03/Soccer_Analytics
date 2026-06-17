@@ -41,7 +41,12 @@ from transform.features import (
 
 logger = logging.getLogger(__name__)
 
-_WORKERS      = max(1, (os.cpu_count() or 2) - 1)
+# cpu_count - 1 assumes RAM scales with cores, which is false on this box
+# (16 logical cores, ~10GB RAM) -- that many workers each parsing full match
+# JSON concurrently caused an OpenBLAS allocation failure and later a
+# Postgres-side OOM. Cap at 4 by default; override with --workers if the
+# host has more headroom.
+_WORKERS      = min(4, max(1, (os.cpu_count() or 2) - 1))
 _COMMIT_EVERY = 50
 
 

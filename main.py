@@ -9,7 +9,20 @@ Flags:
   --train         Train ML models after ingestion
   --skip-ingest   Skip ingestion, run only training
   --workers N     Worker processes for StatsBomb ingestion (default: CPU count - 1)
+
+Each worker process imports numpy/pandas, which load BLAS and otherwise try
+to use one thread per core *inside every worker*. With N worker processes
+that is N x cores BLAS threads fighting over RAM at once -- the proximate
+cause of an "OpenBLAS error: Memory allocation still failed" crash on
+memory-constrained machines. Pin BLAS libraries to 1 thread per worker
+before numpy is imported anywhere (env vars must be set pre-import).
 """
+
+import os
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
 import logging
