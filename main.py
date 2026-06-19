@@ -53,6 +53,21 @@ def parse_args():
     return p.parse_args()
 
 
+def _persist_to_db(conn, registry, result, label):
+    """Hybrid persistence: write each model's registry row + derived prediction
+    tables into PostgreSQL. The .pkl/.parquet artifacts on disk are unaffected.
+    Wrapped so a DB hiccup never aborts training (artifacts are already saved)."""
+    if not isinstance(result, dict) or "_registry" not in result:
+        return
+    try:
+        registry.register_model(conn, **result["_registry"])
+        for table, df in (result.get("_predictions") or {}).items():
+            registry.replace_table(conn, table, df)
+    except Exception as exc:  # noqa: BLE001
+        conn.rollback()
+        logger.warning("Registry persistence failed for %s: %s", label, exc)
+
+
 def main():
     args = parse_args()
     sb.set_root(DATA_ROOT)
@@ -80,6 +95,7 @@ def main():
         from models.model3_injury_risk       import run as train3
         from models.model5_win_probability   import run as train5
         from models.model_xg                 import run as train_xg
+        from core import registry
 
         for label, fn in [
             ("Model 1: Player Efficiency & Style Profiling", train1),
@@ -89,7 +105,8 @@ def main():
             ("Model xG: Expected Goals",                      train_xg),
         ]:
             logger.info(label)
-            fn(conn)
+            result = fn(conn)
+            _persist_to_db(conn, registry, result, label)
 
     conn.close()
     logger.info("Pipeline complete.")

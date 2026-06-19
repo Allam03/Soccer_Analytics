@@ -1072,6 +1072,20 @@ def run(conn, output_dir: str = "artifacts/model1") -> dict[str, Any]:
         "style_label_map":    style_label_map,
         "spatial_metrics":    spatial_metrics,
         "style_metrics":      style_metrics,
+        "_registry": {
+            "model_key": "model1_player_clustering",
+            "version": "4.0",
+            "display_name": "Player Efficiency & Style Profiling",
+            "task": "clustering",
+            "algorithm": "KMeans (spatial axis) + GaussianMixture (style axis)",
+            "target": "player archetype (unsupervised, dual-axis)",
+            "features": list(STYLE_FEATURES),
+            "metrics": {"spatial": spatial_metrics, "style": style_metrics},
+            "n_train_rows": int(len(df_out)),
+            "artifact_path": str(ARTIFACT_DIR),
+            "prediction_table": "model1_player_clusters",
+        },
+        "_predictions": {"model1_player_clusters": df_out},
     }
 
 

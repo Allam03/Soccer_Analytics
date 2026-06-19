@@ -17,6 +17,8 @@ const PAGE_TITLES = {
   cohesion:  "Pass Networks (Tactical)",
   injury:    "Injury Risk Prediction",
   winprob:   "Win Probability Modeling",
+  eda:       "Exploratory Data Analysis",
+  models:    "Models & Methodology",
 };
 
 function navigateTo(pageId) {

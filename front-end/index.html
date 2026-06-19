@@ -18,11 +18,11 @@
   />
 
   <!-- CSS load order matters: tokens → reset → layout → components → pages -->
-  <link rel="stylesheet" href="/static/css/variables.css?v=2.6.0" />
-  <link rel="stylesheet" href="/static/css/reset.css?v=2.6.0" />
-  <link rel="stylesheet" href="/static/css/layout.css?v=2.6.0" />
-  <link rel="stylesheet" href="/static/css/components.css?v=2.6.0" />
-  <link rel="stylesheet" href="/static/css/pages.css?v=2.6.0" />
+  <link rel="stylesheet" href="/static/css/variables.css?v=2.7.0" />
+  <link rel="stylesheet" href="/static/css/reset.css?v=2.7.0" />
+  <link rel="stylesheet" href="/static/css/layout.css?v=2.7.0" />
+  <link rel="stylesheet" href="/static/css/components.css?v=2.7.0" />
+  <link rel="stylesheet" href="/static/css/pages.css?v=2.7.0" />
 
   <!-- Must load synchronously BEFORE the body scripts: charts.js references
        Chart.defaults at the top level. With `defer` it would run after the
@@ -73,6 +73,17 @@
       <div class="nav-item" data-page="winprob">
         <span class="nav-icon">📈</span>
         <span>Win Probability</span>
+      </div>
+
+      <div class="nav-section-label" style="margin-top:16px">Data &amp; Models</div>
+
+      <div class="nav-item" data-page="eda">
+        <span class="nav-icon">🔬</span>
+        <span>Exploratory Data</span>
+      </div>
+      <div class="nav-item" data-page="models">
+        <span class="nav-icon">🧠</span>
+        <span>Models &amp; Methodology</span>
       </div>
 
       <div class="nav-item nav-debug" data-page="debug">
@@ -155,6 +166,14 @@
         <div id="winprob-content"></div>
       </div>
 
+      <div class="page" id="page-eda">
+        <div id="eda-content"></div>
+      </div>
+
+      <div class="page" id="page-models">
+        <div id="models-content"></div>
+      </div>
+
       <div class="page" id="page-debug">
         <div id="debug-content"></div>
       </div>
@@ -176,12 +195,12 @@
   6. pageLoader.js  — async HTML injection; sets window.pagesLoadedPromise
                       main.js awaits this before rendering anything
 -->
-<script src="/static/js/charts.js?v=2.6.0"></script>
-<script src="/static/js/passNetwork.js?v=2.6.0"></script>
-<script src="/static/js/navigation.js?v=2.6.0"></script>
-<script src="/static/js/api.js?v=2.6.0"></script>
-<script src="/static/js/main.js?v=2.6.0"></script>
-<script src="/static/js/pageLoader.js?v=2.6.0"></script>
+<script src="/static/js/charts.js?v=2.7.0"></script>
+<script src="/static/js/passNetwork.js?v=2.7.0"></script>
+<script src="/static/js/navigation.js?v=2.7.0"></script>
+<script src="/static/js/api.js?v=2.7.0"></script>
+<script src="/static/js/main.js?v=2.7.0"></script>
+<script src="/static/js/pageLoader.js?v=2.7.0"></script>
 
 </body>
 </html>

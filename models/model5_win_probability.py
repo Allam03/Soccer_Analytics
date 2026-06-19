@@ -226,6 +226,8 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
 
     artifacts = {}
+    pre_m = pre_s = pre_ho = pre_naive = None
+    ig_m = ig_s = ig_ho = ig_naive = None
 
     # ── Sub-model A: pre-match ──────────────────────────────────────────────
     logger.info("Model 5A: loading pre-match features ...")
@@ -247,13 +249,13 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
                 n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
             )),
         ])
-        m, s = grouped_cv(gbc_pipe_pre, X_pre, y_pre, groups, "accuracy", stratified=True)
-        naive = np.bincount(y_pre).max() / len(y_pre)
+        pre_m, pre_s = grouped_cv(gbc_pipe_pre, X_pre, y_pre, groups, "accuracy", stratified=True)
+        pre_naive = np.bincount(y_pre).max() / len(y_pre)
         logger.info("Pre-match accuracy (StratifiedGroupKFold): %.3f +/- %.3f "
-                    "(naive majority=%.3f, lift=%+.3f)", m, s, naive, m - naive)
-        ho, n = holdout_season(gbc_pipe_pre, X_pre, y_pre, seasons, "accuracy")
-        if ho is not None:
-            logger.info("Pre-match accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, ho)
+                    "(naive majority=%.3f, lift=%+.3f)", pre_m, pre_s, pre_naive, pre_m - pre_naive)
+        pre_ho, n = holdout_season(gbc_pipe_pre, X_pre, y_pre, seasons, "accuracy")
+        if pre_ho is not None:
+            logger.info("Pre-match accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, pre_ho)
         gbc_pipe_pre.fit(X_pre, y_pre)
 
         # Save scaler and estimator separately so api_server.py can call
@@ -294,13 +296,13 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
         # share the same final-result label and identical rolling-form features,
         # so a shuffled split lets the model memorise matches (0.89 shuffled vs
         # ~0.64 grouped).
-        m, s = grouped_cv(gbc_pipe_ig, X_ig, y_ig, groups_ig, "accuracy", stratified=True)
-        naive = np.bincount(y_ig).max() / len(y_ig)
+        ig_m, ig_s = grouped_cv(gbc_pipe_ig, X_ig, y_ig, groups_ig, "accuracy", stratified=True)
+        ig_naive = np.bincount(y_ig).max() / len(y_ig)
         logger.info("In-game accuracy (StratifiedGroupKFold by match): %.3f +/- %.3f "
-                    "(naive majority=%.3f)", m, s, naive)
-        ho, n = holdout_season(gbc_pipe_ig, X_ig, y_ig, seasons_ig, "accuracy")
-        if ho is not None:
-            logger.info("In-game accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, ho)
+                    "(naive majority=%.3f)", ig_m, ig_s, ig_naive)
+        ig_ho, n = holdout_season(gbc_pipe_ig, X_ig, y_ig, seasons_ig, "accuracy")
+        if ig_ho is not None:
+            logger.info("In-game accuracy held-out %s (n=%d): %.3f", TEST_SEASON, n, ig_ho)
         gbc_pipe_ig.fit(X_ig, y_ig)
 
         gbc_ig    = gbc_pipe_ig.named_steps["clf"]
@@ -319,7 +321,38 @@ def run(conn, output_dir: str = "artifacts/model5") -> Dict[str, Any]:
         )
 
     logger.info("Model 5 complete.")
-    return artifacts
+
+    metrics: dict[str, Any] = {}
+    if pre_m is not None:
+        metrics["prematch_accuracy"] = float(pre_m)
+        metrics["prematch_accuracy_std"] = float(pre_s)
+        metrics["prematch_naive"] = float(pre_naive)
+    if pre_ho is not None:
+        metrics["prematch_accuracy_heldout"] = float(pre_ho)
+    if ig_m is not None:
+        metrics["ingame_accuracy"] = float(ig_m)
+        metrics["ingame_accuracy_std"] = float(ig_s)
+        metrics["ingame_naive"] = float(ig_naive)
+    if ig_ho is not None:
+        metrics["ingame_accuracy_heldout"] = float(ig_ho)
+
+    result: dict[str, Any] = dict(artifacts)
+    result["_registry"] = {
+        "model_key": "model5_win_probability",
+        "version": "1.0",
+        "display_name": "Win Probability",
+        "task": "classification",
+        "algorithm": "GradientBoostingClassifier (pre-match + in-game)",
+        "target": "match result (win / draw / loss)",
+        "features": list(FEATURES_PRE_MATCH),
+        "metrics": metrics,
+        "n_train_rows": int(len(df_pre)) if not df_pre.empty else 0,
+        "artifact_path": output_dir,
+        "prediction_table": "model5_features_pre",
+    }
+    if not df_pre.empty:
+        result["_predictions"] = {"model5_features_pre": df_pre}
+    return result
 
 
 if __name__ == "__main__":

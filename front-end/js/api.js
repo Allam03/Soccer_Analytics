@@ -97,4 +97,13 @@ const ApiService = {
   async loadMatchTimeline(matchId) {
     return this.request(`/match-xg-timeline?match_id=${matchId}`);
   },
+
+  // EDA and model-registry data are team-independent (whole-dataset views).
+  async loadEDA() {
+    return this.request(`/eda`);
+  },
+
+  async loadModels() {
+    return this.request(`/models`);
+  },
 };

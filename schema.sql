@@ -264,3 +264,39 @@ CREATE TABLE IF NOT EXISTS shots (
 CREATE INDEX IF NOT EXISTS idx_shots_match  ON shots (match_id);
 CREATE INDEX IF NOT EXISTS idx_shots_player ON shots (player_id);
 CREATE INDEX IF NOT EXISTS idx_shots_team   ON shots (team_id);
+
+
+-- -----------------------------------------------------------------------------
+-- MODEL REGISTRY  (hybrid model persistence)
+--
+-- One row per trained model. The .pkl binaries stay on disk under
+-- artifacts/<model_key>/ (industry-standard for sklearn/xgboost estimators);
+-- this table is the queryable source of truth for *what* was trained, *when*,
+-- on *which features*, and *how well it scored*. Populated by main.py after
+-- each model's run() via core/registry.register_model().
+--
+-- The derived tabular prediction outputs (e.g. player_clusters, shot xG
+-- predictions, feature matrices) are loaded into their own Postgres tables by
+-- core/registry.replace_table(), which creates them dynamically from the
+-- DataFrame schema at training time — so they are intentionally NOT declared
+-- here. metrics/features are JSONB for flexible, queryable model cards.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS model_registry (
+    model_id        SERIAL      PRIMARY KEY,
+    model_key       TEXT        NOT NULL,   -- e.g. "model_xg", "model1_player_clustering"
+    version         TEXT        NOT NULL,   -- semantic version of the model code
+    display_name    TEXT,                   -- human-friendly name for the UI
+    task            TEXT,                   -- "classification" | "regression" | "clustering"
+    algorithm       TEXT,                   -- estimator(s) used
+    target          TEXT,                   -- prediction target / objective
+    features        JSONB,                  -- list of input feature names
+    metrics         JSONB,                  -- {metric_name: value, ...} (CV + held-out)
+    n_train_rows    INT,
+    sklearn_version TEXT,
+    artifact_path   TEXT,                   -- on-disk artifact directory
+    prediction_table TEXT,                  -- companion Postgres table, if any
+    trained_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (model_key, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_registry_key ON model_registry (model_key);

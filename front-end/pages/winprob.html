@@ -1,4 +1,5 @@
 <!-- pages/winprob.html -->
+<div class="model-info" data-model="model5_win_probability"></div>
 <div class="prob-banner">
   <div class="prob-match">Next Match Prediction • Loading...</div>
   <div class="prob-values">
@@ -45,45 +46,45 @@
       <div class="factor-val">+15%</div>
     </div>
     <div class="factors-item">
-      <div class="factor-name">Recent Form (5 games)</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div></div>
-      <div class="factor-val shimmer" style="height:16px;width:50px">&nbsp;</div>
+      <div class="factor-name">Recent Form (last 10)</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpFormBar" style="width:0%"></div></div></div>
+      <div class="factor-val" id="wpFormVal">—</div>
     </div>
     <div class="factors-item">
-      <div class="factor-name">Expected Goals (xG)</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div></div>
-      <div class="factor-val shimmer" style="height:16px;width:50px">&nbsp;</div>
+      <div class="factor-name">Expected Goals (per match)</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpXgBar" style="width:0%"></div></div></div>
+      <div class="factor-val" id="wpXgVal">—</div>
     </div>
     <div class="factors-item">
       <div class="factor-name">Squad Availability</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:0%"></div></div></div>
-      <div class="factor-val shimmer" style="height:16px;width:50px">&nbsp;</div>
+      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpSquadBar" style="width:0%"></div></div></div>
+      <div class="factor-val" id="wpSquadVal">—</div>
     </div>
   </div>
 
   <div class="card">
-    <div class="card-title">Historical Accuracy</div>
+    <div class="card-title">Model Accuracy (cross-validated)</div>
     <div class="inline-stat">
-      <div class="inline-stat-label">Overall Accuracy</div>
-      <div class="inline-stat-val text-accent shimmer" style="height:20px;width:50px">&nbsp;</div>
+      <div class="inline-stat-label">Pre-match accuracy</div>
+      <div class="inline-stat-val text-accent" id="wpAccVal">—</div>
     </div>
-    <div class="progress-bar mb-16"><div class="progress-fill green" style="width:0%"></div></div>
+    <div class="progress-bar mb-16"><div class="progress-fill green" id="wpAccBar" style="width:0%"></div></div>
     <div class="accuracy-nums">
       <div class="acc-num">
-        <div class="acc-val pos shimmer" style="height:36px;width:60px">&nbsp;</div>
-        <div class="acc-label">Correct Predictions</div>
+        <div class="acc-val pos" id="wpAccCv">—</div>
+        <div class="acc-label">In-game accuracy</div>
       </div>
       <div class="acc-num">
-        <div class="acc-val neg shimmer" style="height:36px;width:60px">&nbsp;</div>
-        <div class="acc-label">Incorrect</div>
+        <div class="acc-val neg" id="wpAccHo">—</div>
+        <div class="acc-label">Held-out 2022</div>
       </div>
     </div>
     <div class="divider"></div>
-    <div class="card-title">Confidence Calibration</div>
-    <p class="text-muted fs-12" style="line-height:1.6">
-      Calibration metrics available after model training. Run
-      <code style="background:var(--bg-secondary);padding:1px 5px;border-radius:3px">python main.py --train</code>
-      to generate artifacts.
+    <div class="card-title">Methodology</div>
+    <p class="text-muted fs-12" style="line-height:1.6" id="wpCalib">
+      Outcomes are predicted with a GradientBoostingClassifier, validated with
+      StratifiedGroupKFold (grouped by match so no match leaks across folds) and
+      a held-out 2022 season. Accuracy figures come live from the model registry.
     </p>
   </div>
 </div>

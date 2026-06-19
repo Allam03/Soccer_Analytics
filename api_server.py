@@ -117,10 +117,19 @@ def _parquet(path) -> pd.DataFrame | None:
 
 def _load_all_artifacts() -> None:
     a = ARTIFACT_DIR
+    # model1_player_clustering.py (v4.0) is dual-axis: a spatial KMeans (fit on
+    # avg_x_start/avg_y_start) and a style GaussianMixture (fit on per-90 rate
+    # features), each with its own scaler. There is no single "kmeans.pkl" /
+    # "scaler.pkl" pair any more — those names belonged to a pre-v4.0 version
+    # of the script. Loaded here under their real names for debug visibility
+    # only; live serving uses the precomputed final_player_archetype column in
+    # the parquet below (see player_efficiency()), not a live re-prediction.
     _A["m1"] = {
-        "kmeans": _load(a / "model1" / "kmeans.pkl"),
-        "scaler": _load(a / "model1" / "scaler.pkl"),
-        "df":     _parquet(a / "model1" / "player_clusters.parquet"),
+        "kmeans_spatial": _load(a / "model1" / "model1_kmeans_spatial.pkl"),
+        "scaler_spatial": _load(a / "model1" / "model1_scaler_spatial.pkl"),
+        "gmm_style":      _load(a / "model1" / "model1_gmm_style.pkl"),
+        "scaler_style":   _load(a / "model1" / "model1_scaler.pkl"),
+        "df":             _parquet(a / "model1" / "player_clusters.parquet"),
     }
     _A["m2"] = {
         "gbr":     _load(a / "model2" / "gbr.pkl"),
@@ -181,6 +190,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+# Serve trained-model diagnostic figures (PCA scatter, silhouette bars, radar
+# profiles, feature heatmaps, calibration, ...) straight from the artifacts dir
+# so the Models & Methodology page can embed them with <img src="/artifacts/...">.
+if ARTIFACT_DIR.exists():
+    app.mount("/artifacts", StaticFiles(directory=ARTIFACT_DIR), name="artifacts")
 
 
 # =============================================================================
@@ -358,6 +373,173 @@ def debug_db() -> dict[str, Any]:
 
 
 # =============================================================================
+# /api/models  — model registry (powers the Models & Methodology page)
+# =============================================================================
+
+def _model_figures(artifact_path: str | None) -> list[str]:
+    """Return URLs for the diagnostic PNGs of a model, served via /artifacts.
+
+    The registry stores artifact_path like "artifacts/model1"; the on-disk
+    folder name (its last component) is also the /artifacts URL segment."""
+    if not artifact_path:
+        return []
+    name = Path(artifact_path).name           # e.g. "model1", "model_xg"
+    d = ARTIFACT_DIR / name
+    if not d.exists():
+        return []
+    return sorted(f"/artifacts/{name}/{p.name}" for p in d.glob("*.png"))
+
+
+@app.get("/api/models")
+def models() -> dict[str, Any]:
+    try:
+        rows = _query(
+            """
+            SELECT model_key, version, display_name, task, algorithm, target,
+                   features, metrics, n_train_rows, sklearn_version,
+                   artifact_path, prediction_table, trained_at
+            FROM model_registry
+            ORDER BY model_key
+            """
+        )
+        if rows:
+            for r in rows:
+                if r.get("trained_at") is not None:
+                    r["trained_at"] = str(r["trained_at"])
+                r["figures"] = _model_figures(r.get("artifact_path"))
+            logger.info("/api/models: %d models from registry", len(rows))
+            return {"models": rows, "source": "database"}
+        logger.warning("/api/models: registry empty")
+        return {
+            "models": [],
+            "source": "empty",
+            "note": "model_registry is empty — run `python main.py --train` "
+                    "to train models and populate the registry.",
+        }
+    except Exception as exc:
+        logger.warning("/api/models DB error: %s", exc)
+        _last_errors["models"] = str(exc)
+        return {"models": [], "source": "fallback", "error": str(exc)}
+
+
+# =============================================================================
+# /api/eda  — exploratory data analysis over the source tables
+# =============================================================================
+
+def _safe_rows(sql: str, params: tuple = ()) -> list[dict]:
+    """Run a query and return [] on any error (EDA panels degrade independently)."""
+    try:
+        return _query(sql, params)
+    except Exception as exc:
+        logger.warning("/api/eda query failed: %s", exc)
+        return []
+
+
+@app.get("/api/eda")
+def eda() -> dict[str, Any]:
+    if not _db_ok():
+        return {"source": "fallback", "error": "DB unreachable", "overview": {}}
+
+    overview = {
+        tbl: _table_count(tbl)
+        for tbl in (
+            "teams", "players", "matches", "shots",
+            "injuries", "player_match_stats", "pass_network_edges",
+        )
+    }
+
+    # Matches per competition + season (dataset scope/coverage).
+    coverage = _safe_rows(
+        """
+        SELECT competition, season, COUNT(*) AS matches
+        FROM matches
+        WHERE competition IS NOT NULL
+        GROUP BY competition, season
+        ORDER BY competition, season
+        """
+    )
+
+    # Players per nominal position.
+    positions = _safe_rows(
+        """
+        SELECT COALESCE(NULLIF(TRIM(position), ''), 'Unknown') AS position,
+               COUNT(*) AS n
+        FROM players
+        GROUP BY 1
+        ORDER BY n DESC
+        LIMIT 15
+        """
+    )
+
+    # Shot distance distribution (metres to goal, 16 buckets over 0–40 m).
+    shot_distance = _safe_rows(
+        """
+        SELECT width_bucket(distance, 0, 40, 16) AS bucket, COUNT(*) AS n
+        FROM shots
+        WHERE distance IS NOT NULL
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    )
+
+    # StatsBomb xG distribution (10 buckets over 0–1).
+    xg_distribution = _safe_rows(
+        """
+        SELECT width_bucket(statsbomb_xg, 0, 1, 10) AS bucket, COUNT(*) AS n
+        FROM shots
+        WHERE statsbomb_xg IS NOT NULL
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    )
+
+    # Goals per match distribution.
+    goals_per_match = _safe_rows(
+        """
+        SELECT (home_score + away_score) AS total_goals, COUNT(*) AS n
+        FROM matches
+        WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+        GROUP BY total_goals
+        ORDER BY total_goals
+        """
+    )
+
+    # Shot conversion by body part (data-quality + finishing insight).
+    conversion_by_bodypart = _safe_rows(
+        """
+        SELECT COALESCE(body_part, 'Unknown') AS body_part,
+               COUNT(*) AS shots,
+               SUM(CASE WHEN is_goal THEN 1 ELSE 0 END) AS goals,
+               ROUND(AVG(CASE WHEN is_goal THEN 1.0 ELSE 0.0 END)::numeric, 3) AS conversion
+        FROM shots
+        GROUP BY 1
+        ORDER BY shots DESC
+        """
+    )
+
+    # Injury label balance (for the injury model).
+    injury_balance = _safe_rows(
+        """
+        SELECT is_injured_next_30d AS injured, COUNT(*) AS n
+        FROM player_match_features
+        GROUP BY 1
+        """
+    )
+
+    return {
+        "source": "database",
+        "overview": overview,
+        "coverage": coverage,
+        "positions": positions,
+        "shot_distance": shot_distance,
+        "xg_distribution": xg_distribution,
+        "goals_per_match": goals_per_match,
+        "conversion_by_bodypart": conversion_by_bodypart,
+        "injury_balance": injury_balance,
+    }
+
+
+# =============================================================================
 # /api/options/teams
 # =============================================================================
 
@@ -490,24 +672,25 @@ def dashboard(team_id: int) -> dict[str, Any]:
 def player_efficiency(team_id: int) -> dict[str, Any]:
     _validate_team_id(team_id)
 
-    kmeans     = _A.get("m1", {}).get("kmeans")
-    scaler     = _A.get("m1", {}).get("scaler")
     cluster_df = _A.get("m1", {}).get("df")
 
-    FEATURES = [
-        "passes_attempted", "shots", "tackles", "interceptions", "clearances",
-        "carry_distance", "progressive_carries", "key_passes",
-        "progressive_passes", "pressures", "dribbles_completed",
-    ]
-    # Data-driven archetype labels written by Model 1 (cluster id -> name).
-    # Built from the cluster centroids at training time, so they describe what
-    # each cluster actually is rather than a fixed guess.
-    ARCHETYPE_NAMES: dict[int, str] = {}
-    if cluster_df is not None and "archetype" in cluster_df.columns:
-        ARCHETYPE_NAMES = {
-            int(c): str(a)
-            for c, a in cluster_df[["cluster_kmeans", "archetype"]]
-            .drop_duplicates()
+    # Player archetypes come from the precomputed final_player_archetype
+    # column in player_clusters.parquet (Model 1's dual-axis spatial+style
+    # clustering, run offline over the full historical dataset), looked up by
+    # player_id. There is no cheap, correct way to re-predict an archetype
+    # live for a player missing from that table: the spatial axis needs
+    # avg_x_start/avg_y_start (not part of this per-match-stats query) and the
+    # style axis needs the full per-90 feature vector + GMM posterior. Players
+    # missing from the parquet (e.g. below Model 1's training thresholds) are
+    # simply labelled "Unclassified" rather than guessed.
+    archetype_by_player: dict[int, str] = {}
+    if (cluster_df is not None
+            and "player_id" in cluster_df.columns
+            and "final_player_archetype" in cluster_df.columns):
+        archetype_by_player = {
+            int(pid): str(arch)
+            for pid, arch in cluster_df[["player_id", "final_player_archetype"]]
+            .drop_duplicates(subset="player_id")
             .itertuples(index=False, name=None)
         }
 
@@ -546,18 +729,10 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
             logger.info("/api/player-efficiency team=%d: %d players from DB", team_id, len(rows))
             rows = [dict(r) for r in rows]
 
-            cluster_map: dict[str, str] = {}
-            if cluster_df is not None and "team_id" in cluster_df.columns and "archetype" in cluster_df.columns:
-                team_clusters = cluster_df[cluster_df["team_id"] == team_id]
-                for _, cr in team_clusters.iterrows():
-                    cluster_map[str(cr["player_name"])] = str(cr["archetype"])
-
             for r in rows:
-                if r["player_name"] in cluster_map:
-                    r["player_type"] = cluster_map[r["player_name"]]
-                else:
-                    cid = _predict_cluster(r, FEATURES, kmeans, scaler)
-                    r["player_type"] = ARCHETYPE_NAMES.get(cid, "Unclassified")
+                r["player_type"] = archetype_by_player.get(
+                    int(r["player_id"]), "Unclassified"
+                )
 
             leader = rows[0]
             radar  = _build_radar(leader)
@@ -581,11 +756,10 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
         if not team_df.empty:
             players_out = []
             for _, row in team_df.iterrows():
-                cid = int(row.get("cluster_kmeans", 0))
                 players_out.append({
                     "player_name":     str(row["player_name"]),
-                    "position":        str(row.get("position") or "-"),
-                    "player_type":     str(row.get("archetype") or ARCHETYPE_NAMES.get(cid, "Unclassified")),
+                    "position":        str(row.get("spatial_cluster_name") or "-"),
+                    "player_type":     str(row.get("final_player_archetype") or "Unclassified"),
                     "matches":         int(row.get("matches_played", 10)),
                     "minutes":         int(row.get("matches_played", 10)) * 85,
                     "xg_per_90":       round(float(row.get("shots") or 2) * 0.10, 2),
@@ -1337,27 +1511,6 @@ def win_probability(team_id: int) -> dict[str, Any]:
 # =============================================================================
 # Internal helpers
 # =============================================================================
-
-def _predict_cluster(row: dict, features: list, kmeans, scaler) -> int:
-    if kmeans is None or scaler is None:
-        return 0
-    try:
-        # Model 1 is trained on per-90 features. The row carries per-match
-        # averages plus total matches/minutes, so convert avg -> per-90
-        # (avg * matches / minutes * 90) to match the training representation.
-        matches = float(row.get("matches") or 0)
-        minutes = float(row.get("minutes") or 0)
-        vec = []
-        for f in features:
-            v = float(row.get(f) or 0)
-            if matches > 0 and minutes > 0:
-                v = v * matches / minutes * 90.0
-            vec.append(v)
-        X_sc = scaler.transform(np.array([vec]))
-        return int(kmeans.predict(X_sc)[0])
-    except Exception:
-        return 0
-
 
 def _build_radar(leader: dict) -> dict:
     return {

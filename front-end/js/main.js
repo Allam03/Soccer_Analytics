@@ -22,6 +22,8 @@ const AppState = {
   xg:        null,
   winprob:   null,
   injury:    null,
+  eda:       null,   // whole-dataset EDA (team-independent)
+  models:    null,   // model registry (team-independent)
 };
 
 const _pendingRender = new Set();
@@ -77,10 +79,48 @@ async function bootstrap() {
     });
 
     await refreshAllData();
+
+    // EDA + model-registry data are team-independent — fetch once after the
+    // first team refresh so they don't re-fire on every team change.
+    loadStaticData();
   } catch (err) {
     console.error("[bootstrap] unhandled error:", err);
     showGlobalError(`Bootstrap error: ${err.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Static (team-independent) data: EDA + model registry
+// ---------------------------------------------------------------------------
+
+async function loadStaticData() {
+  debug("loadStaticData() start");
+  const [edaRes, modelsRes] = await Promise.allSettled([
+    Promise.resolve().then(() => ApiService.loadEDA()),
+    Promise.resolve().then(() => ApiService.loadModels()),
+  ]);
+
+  AppState.eda    = edaRes.status    === "fulfilled" ? edaRes.value    : null;
+  AppState.models = modelsRes.status === "fulfilled" ? modelsRes.value : null;
+
+  if (edaRes.status === "rejected")
+    console.error("[loadStaticData] eda failed:", edaRes.reason);
+  if (modelsRes.status === "rejected")
+    console.error("[loadStaticData] models failed:", modelsRes.reason);
+
+  _pendingRender.add("eda");
+  _pendingRender.add("models");
+
+  // Fill the per-page "About this model" panels across the analytics pages.
+  renderModelInfoPanels();
+
+  // The win-probability accuracy panel depends on the model registry, which
+  // resolves after the first team refresh — fill it once models are in.
+  renderWinProbFactors();
+
+  const active = document.querySelector(".page.active")?.id?.replace("page-", "");
+  if (active === "eda" || active === "models") renderPage(active);
+  debug("loadStaticData() complete");
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +245,8 @@ function renderPage(pageId) {
     case "xg":        _safeRender(renderXG,        "xg");        break;
     case "winprob":   _safeRender(renderWinProb,   "winprob");   break;
     case "injury":    _safeRender(renderInjury,    "injury");    break;
+    case "eda":       _safeRender(renderEDA,       "eda");       break;
+    case "models":    _safeRender(renderModels,    "models");    break;
     default: debug("Unknown pageId:", pageId);
   }
 }
@@ -247,9 +289,47 @@ function renderDashboard() {
   // once the xG payload has resolved (it may arrive after the dashboard data).
 
   renderLeagueXG();
+  renderRecentResults();
 
   animateCards();
   animateProgressBars();
+}
+
+// ---------------------------------------------------------------------------
+// renderRecentResults (dashboard) — replaces the old "upcoming fixtures" stub.
+// The dataset is historical, so we show the most recent played matches with a
+// W/D/L outcome from the selected team's perspective.
+// ---------------------------------------------------------------------------
+
+function renderRecentResults() {
+  const host = document.getElementById("recentResults");
+  if (!host) return;
+  const matches = AppState.matches?.matches || [];
+  if (!matches.length) {
+    host.innerHTML = '<div class="text-muted fs-12" style="padding:20px 0;text-align:center">No matches available</div>';
+    return;
+  }
+
+  const team = getSelectedTeamName();
+  host.innerHTML = matches.slice(0, 6).map((m) => {
+    const isHome   = m.home_name === team;
+    const opp      = isHome ? m.away_name : m.home_name;
+    const gf       = Number(isHome ? m.home_score : m.away_score);
+    const ga       = Number(isHome ? m.away_score : m.home_score);
+    const outcome  = gf > ga ? "W" : gf < ga ? "L" : "D";
+    const color    = outcome === "W" ? "var(--accent)" : outcome === "L" ? "var(--red)" : "var(--amber)";
+    const venueCls = isHome ? "venue-h" : "venue-a";
+    return `
+      <div class="fixture-item">
+        <div class="fixture-venue ${venueCls}">${isHome ? "H" : "A"}</div>
+        <div class="fixture-opp">vs ${opp}
+          <div class="fixture-date">${m.date || ""}</div>
+        </div>
+        <div class="fixture-prob" style="color:${color}">${m.home_score}–${m.away_score}
+          <span class="badge ${outcome === "W" ? "badge-low" : outcome === "L" ? "badge-high" : "badge-medium"}" style="margin-left:6px">${outcome}</span>
+        </div>
+      </div>`;
+  }).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +670,61 @@ function renderWinProb() {
     });
   }
 
+  renderWinProbFactors();
   _initMatchSelector();
+}
+
+// Key input factors + model-accuracy panel (previously stubbed shimmer cells).
+// Each field is wired from real data already in AppState and degrades gracefully
+// when a source has not resolved yet.
+function renderWinProbFactors() {
+  // Recent form — dashboard team-performance score (0–100).
+  const form = Number(AppState.dashboard?.kpi?.team_performance);
+  if (Number.isFinite(form)) {
+    _setText("wpFormVal", form.toFixed(1));
+    _setBar("wpFormBar", form);
+  }
+
+  // Expected goals per match — from the league xG table for the selected team.
+  const teamName = getSelectedTeamName();
+  const row = (AppState.leaguexg?.teams || []).find((t) => t.team_name === teamName);
+  if (row && Number(row.played)) {
+    const xgpm = Number(row.xg_for) / Number(row.played);
+    _setText("wpXgVal", xgpm.toFixed(2));
+    _setBar("wpXgBar", (xgpm / 3) * 100);   // 3.0 xG/match ≈ full bar
+  }
+
+  // Squad availability — share of low-risk players (Model 3 injury KPIs).
+  const k = AppState.injury?.kpi;
+  if (k) {
+    const total = (Number(k.high) || 0) + (Number(k.medium) || 0) + (Number(k.low) || 0);
+    if (total > 0) {
+      const avail = ((Number(k.low) || 0) / total) * 100;
+      _setText("wpSquadVal", `${avail.toFixed(0)}%`);
+      _setBar("wpSquadBar", avail);
+    }
+  }
+
+  // Cross-validated accuracy — from the Model 5 registry entry.
+  const m5 = (AppState.models?.models || []).find(
+    (m) => m.model_key === "model5_win_probability"
+  );
+  const me = m5?.metrics;
+  if (me) {
+    if (Number.isFinite(Number(me.prematch_accuracy))) {
+      _setText("wpAccVal", fmtPct(me.prematch_accuracy));
+      _setBar("wpAccBar", Number(me.prematch_accuracy) * 100);
+    }
+    if (Number.isFinite(Number(me.ingame_accuracy)))
+      _setText("wpAccCv", fmtPct(me.ingame_accuracy));
+    const ho = me.prematch_accuracy_heldout ?? me.ingame_accuracy_heldout;
+    if (Number.isFinite(Number(ho))) _setText("wpAccHo", fmtPct(ho));
+  }
+}
+
+function _setBar(id, pct) {
+  const el = document.getElementById(id);
+  if (el) el.style.width = `${Math.max(0, Math.min(100, Number(pct) || 0))}%`;
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +863,254 @@ function renderFinishingLeaders() {
       </div>
     `;
   }).join("");
+}
+
+// ===========================================================================
+// EDA page — exploratory data analysis over the source tables
+// ===========================================================================
+
+const EDA_COLORS = { accent: "#38bd83", cyan: "#06b6d4", amber: "#f59e0b", purple: "#8b5cf6" };
+
+function renderEDA() {
+  const data = AppState.eda;
+  const root = document.getElementById("eda-content");
+  if (!data || data.source === "fallback") {
+    if (root) {
+      const note = document.getElementById("edaNote");
+      if (note) note.textContent =
+        "Exploratory data is unavailable — the database is unreachable. Check /api/health.";
+    }
+    return;
+  }
+  debug("renderEDA(), source=", data.source);
+
+  const ov = data.overview || {};
+  _setText("edaMatches", fmtInt(ov.matches));
+  _setText("edaPlayers", fmtInt(ov.players));
+  _setText("edaShots",   fmtInt(ov.shots));
+  _setText("edaEdges",   fmtInt(ov.pass_network_edges));
+
+  // Shot distance distribution (16 buckets over 0–40 m).
+  const sd = data.shot_distance || [];
+  const sdLabels = sd.map((r) => `${((r.bucket - 1) * 2.5).toFixed(0)}`);
+  const sdValues = sd.map((r) => r.n);
+
+  // StatsBomb xG distribution (10 buckets over 0–1).
+  const xd = data.xg_distribution || [];
+  const xdLabels = xd.map((r) => `${((r.bucket - 1) * 0.1).toFixed(1)}`);
+  const xdValues = xd.map((r) => r.n);
+
+  // Goals per match.
+  const gm = data.goals_per_match || [];
+  const gmLabels = gm.map((r) => r.total_goals);
+  const gmValues = gm.map((r) => r.n);
+
+  // Players by position (doughnut).
+  const pos = data.positions || [];
+  const posLabels = pos.map((r) => r.position);
+  const posValues = pos.map((r) => r.n);
+
+  requestAnimationFrame(() => {
+    Charts.initSimpleBar("edaShotDist", sdLabels, sdValues, EDA_COLORS.cyan,
+      { xTitle: "Distance to goal (m)", yTitle: "Shots" });
+    Charts.initSimpleBar("edaXgDist", xdLabels, xdValues, EDA_COLORS.accent,
+      { xTitle: "StatsBomb xG", yTitle: "Shots" });
+    Charts.initSimpleBar("edaGoalsDist", gmLabels, gmValues, EDA_COLORS.purple,
+      { xTitle: "Goals in match", yTitle: "Matches" });
+    Charts.initDoughnut("edaPositions", posLabels, posValues);
+  });
+
+  // Competition coverage table.
+  const covBody = document.querySelector("#edaCoverageTable tbody");
+  if (covBody) {
+    const rows = data.coverage || [];
+    covBody.innerHTML = rows.length
+      ? rows.map((r) => `<tr><td class="fw-700">${r.competition}</td>
+          <td>${r.season || "-"}</td><td>${fmtInt(r.matches)}</td></tr>`).join("")
+      : '<tr><td colspan="3" class="text-muted text-center">No data</td></tr>';
+  }
+
+  // Shot conversion by body part.
+  const convBody = document.querySelector("#edaConversionTable tbody");
+  if (convBody) {
+    const rows = data.conversion_by_bodypart || [];
+    convBody.innerHTML = rows.length
+      ? rows.map((r) => {
+          const pct = (Number(r.conversion || 0) * 100).toFixed(1);
+          return `<tr><td class="fw-700">${r.body_part}</td>
+            <td>${fmtInt(r.shots)}</td><td>${fmtInt(r.goals)}</td>
+            <td>${pct}%</td></tr>`;
+        }).join("")
+      : '<tr><td colspan="4" class="text-muted text-center">No data</td></tr>';
+  }
+}
+
+// ===========================================================================
+// Models & Methodology page — model registry cards
+// ===========================================================================
+
+function modelHeadline(m) {
+  const me = m.metrics || {};
+  switch (m.model_key) {
+    case "model_xg":
+      return { value: fmtMetric(me.roc_auc),
+               label: `ROC-AUC (StatsBomb ${fmtMetric(me.statsbomb_roc_auc)})` };
+    case "model3_injury_risk":
+      return { value: fmtMetric(me.xgb_roc_auc ?? me.rf_roc_auc), label: "ROC-AUC" };
+    case "model5_win_probability":
+      return { value: fmtPct(me.ingame_accuracy ?? me.prematch_accuracy),
+               label: "In-game accuracy" };
+    case "model2_team_cohesion":
+      return { value: fmtMetric(me.gbr_r2), label: "GBR R² (grouped CV)" };
+    case "model1_player_clustering":
+      return { value: fmtMetric(me.spatial?.silhouette), label: "Spatial silhouette" };
+    default:
+      return { value: "—", label: "" };
+  }
+}
+
+function flattenMetrics(metrics, prefix = "") {
+  const out = [];
+  for (const [k, v] of Object.entries(metrics || {})) {
+    if (k === "feature_importances") continue;
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      out.push(...flattenMetrics(v, key));
+    } else if (typeof v === "number" || typeof v === "string") {
+      out.push({ k: key, v });
+    }
+  }
+  return out;
+}
+
+function modelCardHTML(m) {
+  const h       = modelHeadline(m);
+  const metrics = flattenMetrics(m.metrics);
+  const figs    = (m.figures || []).slice(0, 6);
+  const feats   = m.features || [];
+
+  const metricTiles = metrics.map((row) => `
+    <div class="mm-tile">
+      <div class="mm-val">${typeof row.v === "number" ? fmtMetric(row.v) : row.v}</div>
+      <div class="mm-key">${row.k}</div>
+    </div>`).join("");
+
+  const figHTML = figs.length ? `
+    <div class="model-figs">
+      ${figs.map((src) => `
+        <a href="${src}" target="_blank" rel="noopener" title="Open full size">
+          <img loading="lazy" src="${src}" alt="diagnostic figure">
+        </a>`).join("")}
+    </div>` : "";
+
+  return `
+    <div class="card model-card">
+      <div class="model-card-head">
+        <div>
+          <div class="model-card-title">${m.display_name || m.model_key}</div>
+          <div class="text-muted fs-12">${m.model_key} · v${m.version} · ${m.task || "—"}</div>
+        </div>
+        <div class="model-card-headline">
+          <div class="mch-val">${h.value}</div>
+          <div class="mch-lbl">${h.label}</div>
+        </div>
+      </div>
+
+      <div class="model-card-meta">
+        <div><span class="text-muted fs-11">Algorithm</span><div>${m.algorithm || "—"}</div></div>
+        <div><span class="text-muted fs-11">Target / objective</span><div>${m.target || "—"}</div></div>
+        <div><span class="text-muted fs-11">Training rows</span><div>${fmtInt(m.n_train_rows)}</div></div>
+        <div><span class="text-muted fs-11">Trained</span><div>${(m.trained_at || "—").slice(0, 10)}</div></div>
+      </div>
+
+      <div class="model-metrics-grid">${metricTiles || '<span class="text-muted fs-12">No metrics recorded</span>'}</div>
+
+      <details class="model-features">
+        <summary>Input features (${feats.length})</summary>
+        <div class="feature-chips">${feats.map((f) => `<span class="chip">${f}</span>`).join("")}</div>
+      </details>
+
+      ${figHTML}
+    </div>`;
+}
+
+function renderModels() {
+  const container = document.getElementById("modelsContainer");
+  if (!container) return;
+  const data   = AppState.models;
+  const models = data?.models || [];
+
+  if (!models.length) {
+    container.innerHTML = `
+      <div class="card text-muted text-center" style="padding:32px">
+        ${data?.note || "No models in the registry yet."}<br>
+        <span class="fs-12">Train models with <code>python main.py --train</code> to populate the registry.</span>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = models.map(modelCardHTML).join("");
+
+  const xg = models.find((m) => m.model_key === "model_xg");
+  if (xg && xg.metrics) {
+    requestAnimationFrame(() => Charts.initXgBenchmark("xgBenchmarkChart", xg.metrics));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-page "About this model" panels (driven by the registry)
+// ---------------------------------------------------------------------------
+
+function renderModelInfoPanels() {
+  const models = AppState.models?.models || [];
+  if (!models.length) return;
+  const byKey = Object.fromEntries(models.map((m) => [m.model_key, m]));
+
+  document.querySelectorAll(".model-info[data-model]").forEach((el) => {
+    const m = byKey[el.dataset.model];
+    if (!m) return;
+    const h = modelHeadline(m);
+    el.innerHTML = `
+      <div class="mi-left">
+        <span class="mi-icon">🧠</span>
+        <div>
+          <div class="mi-name">${m.display_name || m.model_key}
+            <span class="badge badge-blue" style="margin-left:6px">${m.task || ""}</span>
+          </div>
+          <div class="text-muted fs-11">${m.algorithm || ""}</div>
+        </div>
+      </div>
+      <div class="mi-right">
+        <div class="mi-metric">${h.value}</div>
+        <div class="text-muted fs-11">${h.label}</div>
+        <a class="mi-link" onclick="navigateTo('models')">Methodology →</a>
+      </div>`;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Number/format helpers for EDA + Models
+// ---------------------------------------------------------------------------
+
+function _setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) { el.textContent = text; el.classList.remove("shimmer"); }
+}
+
+function fmtInt(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString() : "—";
+}
+
+function fmtMetric(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(3);
+}
+
+function fmtPct(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? `${(v * 100).toFixed(1)}%` : "—";
 }
 
 // ---------------------------------------------------------------------------

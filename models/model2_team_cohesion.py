@@ -440,10 +440,10 @@ def run(conn, output_dir: str = "artifacts/model2") -> Dict[str, Any]:
             n_estimators=200, max_depth=3, learning_rate=0.05, random_state=42)),
     ])
 
-    m, s = grouped_cv(ridge_pipe, X, y, groups, "r2")
-    logger.info("Ridge R2 (GroupKFold by match): %.3f +/- %.3f", m, s)
-    m, s = grouped_cv(gbr_pipe, X, y, groups, "r2")
-    logger.info("GBR   R2 (GroupKFold by match): %.3f +/- %.3f", m, s)
+    ridge_m, ridge_s = grouped_cv(ridge_pipe, X, y, groups, "r2")
+    logger.info("Ridge R2 (GroupKFold by match): %.3f +/- %.3f", ridge_m, ridge_s)
+    gbr_m, gbr_s = grouped_cv(gbr_pipe, X, y, groups, "r2")
+    logger.info("GBR   R2 (GroupKFold by match): %.3f +/- %.3f", gbr_m, gbr_s)
     ho, n = holdout_season(gbr_pipe, X, y, seasons, "r2")
     if ho is not None:
         logger.info("GBR   R2 held-out %s (n=%d): %.3f", TEST_SEASON, n, ho)
@@ -470,7 +470,36 @@ def run(conn, output_dir: str = "artifacts/model2") -> Dict[str, Any]:
     joblib.dump(gbr,    f"{output_dir}/gbr.pkl")
 
     logger.info("Model 2 artefacts saved to %s", output_dir)
-    return {"ridge": ridge, "gbr": gbr, "scaler": scaler, "feat_df": feat_df}
+
+    metrics = {
+        "ridge_r2": float(ridge_m),
+        "ridge_r2_std": float(ridge_s),
+        "gbr_r2": float(gbr_m),
+        "gbr_r2_std": float(gbr_s),
+        "feature_importances": {
+            f: float(v) for f, v in zip(MODEL_FEATURES, gbr.feature_importances_)
+        },
+    }
+    if ho is not None:
+        metrics["gbr_r2_heldout"] = float(ho)
+
+    return {
+        "ridge": ridge, "gbr": gbr, "scaler": scaler, "feat_df": feat_df,
+        "_registry": {
+            "model_key": "model2_team_cohesion",
+            "version": "1.0",
+            "display_name": "Team Cohesion (Pass Networks)",
+            "task": "regression",
+            "algorithm": "GradientBoostingRegressor + Ridge (graph features)",
+            "target": "goals scored",
+            "features": list(MODEL_FEATURES),
+            "metrics": metrics,
+            "n_train_rows": int(len(feat_df)),
+            "artifact_path": output_dir,
+            "prediction_table": "model2_graph_features",
+        },
+        "_predictions": {"model2_graph_features": feat_df},
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════

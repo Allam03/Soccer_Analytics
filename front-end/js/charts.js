@@ -547,4 +547,156 @@ const Charts = {
       },
     });
   },
+
+  // ── Generic histogram / bar (EDA distributions) ───────────────────────────
+  initSimpleBar(canvasId, labels, values, color = C.cyan, opts = {}) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    destroyChart(canvas);
+    if (!labels || !labels.length) return;
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data:                 values,
+          backgroundColor:      color,
+          borderRadius:         3,
+          borderSkipped:        false,
+          hoverBackgroundColor: C.accent,
+        }],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend:  { display: false },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${Number(ctx.raw).toLocaleString()}` },
+          },
+        },
+        scales: makeScales({
+          x: {
+            grid:  { display: false },
+            title: opts.xTitle
+              ? { display: true, text: opts.xTitle, color: '#4a5568', font: { size: 10 } }
+              : undefined,
+          },
+          y: {
+            beginAtZero: true,
+            title: opts.yTitle
+              ? { display: true, text: opts.yTitle, color: '#4a5568', font: { size: 10 } }
+              : undefined,
+          },
+        }),
+      },
+    });
+  },
+
+  // ── Doughnut (categorical counts, e.g. players by position) ────────────────
+  initDoughnut(canvasId, labels, values) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    destroyChart(canvas);
+    if (!labels || !labels.length) return;
+
+    const palette = [
+      C.accent, C.cyan, C.amber, C.purple, C.red,
+      '#3ecf8e', '#22d3ee', '#fbbf24', '#a78bfa', '#f87171',
+      '#10b981', '#60a5fa', '#f59e0b', '#c084fc', '#fb7185',
+    ];
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{
+          data:            values,
+          backgroundColor: labels.map((_, i) => palette[i % palette.length]),
+          borderColor:     '#0a0e1a',
+          borderWidth:     2,
+        }],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        cutout:              '58%',
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 10, family: "'IBM Plex Mono', monospace" }, padding: 10,
+              boxWidth: 8,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${ctx.label}: ${Number(ctx.raw).toLocaleString()}` },
+          },
+        },
+      },
+    });
+  },
+
+  // ── xG benchmark vs StatsBomb (dual-axis: ROC-AUC + log-loss) ──────────────
+  initXgBenchmark(canvasId, metrics) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !metrics) return;
+    destroyChart(canvas);
+
+    const labels = ['Our xG', 'StatsBomb', 'Naive baseline'];
+    const auc    = [metrics.roc_auc, metrics.statsbomb_roc_auc, 0.5];
+    const logloss = [metrics.log_loss, metrics.statsbomb_log_loss, metrics.naive_log_loss];
+
+    new Chart(canvas.getContext('2d'), {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'bar', label: 'ROC-AUC (higher is better)',
+            data: auc, yAxisID: 'y',
+            backgroundColor: C.accent, borderRadius: 3, borderSkipped: false,
+          },
+          {
+            type: 'bar', label: 'Log-loss (lower is better)',
+            data: logloss, yAxisID: 'y1',
+            backgroundColor: C.amber, borderRadius: 3, borderSkipped: false,
+          },
+        ],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(3)}` },
+          },
+        },
+        scales: {
+          x:  { grid: { display: false }, ticks: { color: '#8896aa', font: { size: 11 } } },
+          y:  {
+            position: 'left', min: 0, max: 1, grid: { color: gridColor },
+            ticks: { color: '#4a5568', font: { size: 10 } },
+            title: { display: true, text: 'ROC-AUC', color: '#4a5568', font: { size: 10 } },
+          },
+          y1: {
+            position: 'right', min: 0, grid: { display: false },
+            ticks: { color: '#4a5568', font: { size: 10 } },
+            title: { display: true, text: 'Log-loss', color: '#4a5568', font: { size: 10 } },
+          },
+        },
+      },
+    });
+  },
 };

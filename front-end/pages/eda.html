@@ -1,0 +1,82 @@
+<!-- pages/eda.html — exploratory data analysis over the source tables -->
+<div class="section-header">Dataset Overview</div>
+<p class="text-muted fs-12" id="edaNote" style="margin-bottom:14px">
+  Exploratory analysis of the underlying StatsBomb event data and Transfermarkt
+  injury records that feed every model. All figures are computed live from
+  PostgreSQL via <code>/api/eda</code>.
+</p>
+
+<div class="kpi-grid">
+  <div class="kpi-card" data-tip="Matches ingested across all competitions">
+    <div class="kpi-label">Matches</div>
+    <div class="kpi-value shimmer" id="edaMatches" style="height:36px;width:80px">&nbsp;</div>
+    <div class="kpi-sub">Big-5 + tournaments</div>
+  </div>
+  <div class="kpi-card" data-tip="Distinct players in the database">
+    <div class="kpi-label">Players</div>
+    <div class="kpi-value shimmer" id="edaPlayers" style="height:36px;width:80px">&nbsp;</div>
+    <div class="kpi-sub">across all squads</div>
+  </div>
+  <div class="kpi-card" data-tip="Shot events powering the xG model">
+    <div class="kpi-label">Shots</div>
+    <div class="kpi-value shimmer" id="edaShots" style="height:36px;width:80px">&nbsp;</div>
+    <div class="kpi-sub">with freeze-frame features</div>
+  </div>
+  <div class="kpi-card" data-tip="Aggregated pass-network edges">
+    <div class="kpi-label">Pass Edges</div>
+    <div class="kpi-value shimmer" id="edaEdges" style="height:36px;width:80px">&nbsp;</div>
+    <div class="kpi-sub">passer → receiver pairs</div>
+  </div>
+</div>
+
+<div class="col-7-3 mt-16">
+  <div class="card">
+    <div class="card-title">Shot Distance Distribution</div>
+    <div class="chart-wrap" style="height:240px"><canvas id="edaShotDist"></canvas></div>
+    <p class="text-muted fs-11 mt-8">
+      Most shots come from inside the box; the long right tail (speculative
+      efforts) carries very low scoring probability — the core signal the xG
+      model learns from geometry.
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">Players by Position</div>
+    <div class="chart-wrap" style="height:240px"><canvas id="edaPositions"></canvas></div>
+  </div>
+</div>
+
+<div class="two-col mt-16">
+  <div class="card">
+    <div class="card-title">StatsBomb xG Distribution</div>
+    <div class="chart-wrap" style="height:220px"><canvas id="edaXgDist"></canvas></div>
+    <p class="text-muted fs-11 mt-8">
+      The benchmark xG values are heavily right-skewed — chances are usually
+      low-quality, with rare high-xG opportunities.
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">Goals per Match</div>
+    <div class="chart-wrap" style="height:220px"><canvas id="edaGoalsDist"></canvas></div>
+    <p class="text-muted fs-11 mt-8">
+      Total goals per match — the approximately Poisson shape underpins the
+      expected-points model on the dashboard.
+    </p>
+  </div>
+</div>
+
+<div class="two-col mt-16">
+  <div class="card">
+    <div class="card-title">Competition Coverage</div>
+    <table class="data-table" id="edaCoverageTable">
+      <thead><tr><th>Competition</th><th>Season</th><th>Matches</th></tr></thead>
+      <tbody><tr><td colspan="3" class="text-muted text-center">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <div class="card-title">Shot Conversion by Body Part</div>
+    <table class="data-table" id="edaConversionTable">
+      <thead><tr><th>Body Part</th><th>Shots</th><th>Goals</th><th>Conv.</th></tr></thead>
+      <tbody><tr><td colspan="4" class="text-muted text-center">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
