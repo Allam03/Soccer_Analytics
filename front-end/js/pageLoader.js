@@ -8,7 +8,7 @@
    real script and executes it.
    ============================================================ */
 
-const ASSET_VERSION = "2.7.0";
+const ASSET_VERSION = "2.12.0";
 
 const PAGES = [
   { id: "dashboard-content", file: "/static/pages/dashboard.html" },
@@ -59,7 +59,7 @@ async function loadPage({ id, file }) {
           background:rgba(239,68,68,0.1);
           border:1px solid rgba(239,68,68,0.3);
           border-radius:8px; color:#ef4444; font-size:13px;">
-          ⚠️ Could not load page template: <strong>${file}</strong><br>
+          Could not load page template: <strong>${file}</strong><br>
           <span style="color:var(--text-secondary);font-size:11px">${err.message}</span>
         </div>`;
     }

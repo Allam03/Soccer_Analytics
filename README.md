@@ -269,22 +269,27 @@ indicate which path was taken.
 | Endpoint | Description |
 |---|---|
 | `GET /api/options/teams` | List of teams for the selector dropdown |
-| `GET /api/dashboard?team_id=N` | KPI summary and performance trend |
-| `GET /api/player-efficiency?team_id=N` | Player stats, archetypes, radar chart data |
-| `GET /api/team-cohesion?team_id=N` | Pass network edges and graph metrics |
-| `GET /api/xg-finishing?team_id=N` | Goals vs xG per player, finishing leaderboard |
-| `GET /api/shot-map?team_id=N` | Shot positions and xG for the pitch map |
-| `GET /api/league-xg` | Season table: goals vs xG, points vs expected points |
-| `GET /api/matches?team_id=N` | Recent matches for a team |
+| `GET /api/options/seasons?team_id=N` | Seasons a team appears in (drives the season selector) |
+| `GET /api/player-efficiency?team_id=N&season=S` | Player stats, archetypes, radar chart data |
+| `GET /api/team-cohesion?team_id=N&season=S` | Pass network edges and graph metrics |
+| `GET /api/xg-finishing?team_id=N&season=S` | Goals vs xG per player, finishing leaderboard |
+| `GET /api/shot-map?team_id=N&season=S` | Shot positions and xG for the pitch map |
+| `GET /api/league-xg?season=S` | Season table: goals vs xG, points vs expected points |
+| `GET /api/matches?team_id=N&season=S` | Matches for a team (optionally one season) |
 | `GET /api/match-xg-timeline?match_id=N` | Cumulative xG race for both teams in a match |
-| `GET /api/injury-risk?team_id=N` | Per-player injury risk scores |
-| `GET /api/win-probability?team_id=N` | Pre-match and in-game win probability |
+| `GET /api/injury-risk?team_id=N&season=S` | Per-player injury risk scores |
+| `GET /api/win-probability?team_id=N&season=S` | Model's average pre-match win/draw/loss + actual record |
 | `GET /api/eda` | Exploratory data analysis aggregations over the source tables |
 | `GET /api/models` | Model registry: algorithm, features, metrics, diagnostic figures |
 | `GET /api/health` | DB status, table counts, artifact state, last errors |
 | `GET /api/debug/artifacts` | Detailed type and shape of every loaded artifact |
 | `GET /api/debug/db` | PostgreSQL and psycopg2 version |
 | `GET /artifacts/...` | Static mount serving trained-model diagnostic figures (PNGs) |
+
+The `season=S` parameter is optional on every team-scoped endpoint — omit it (or pass
+`season=all`) for all matches, or pass a value from `/api/options/seasons` (e.g.
+`2015/2016`, `2024`) to filter the whole dashboard to one season. The topbar season
+selector is populated per team and defaults to that team's most-played season.
 
 ### Frontend architecture
 

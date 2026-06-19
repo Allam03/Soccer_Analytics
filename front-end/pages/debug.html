@@ -128,7 +128,7 @@
       health = await r.json();
     } catch (e) {
       console.error('[debug] /api/health failed:', e.message);
-      var msg = '<span class="status-err">⚠ /api/health unreachable: ' + esc(e.message)
+      var msg = '<span class="status-err">/api/health unreachable: ' + esc(e.message)
               + '<br><span style="font-size:11px;color:var(--text-secondary)">'
               + 'Is the server running? <code>uvicorn api_server:app --reload</code>'
               + '</span></span>';
@@ -150,9 +150,9 @@
 
     // DB status
     set('debugDbStatus', health.db_ok
-      ? '<div class="status-ok" style="font-size:15px;font-weight:700;margin-bottom:6px">✓ Connected</div>'
+      ? '<div class="status-ok" style="font-size:15px;font-weight:700;margin-bottom:6px">Connected</div>'
         + '<div class="fs-12 text-muted">' + esc(health.db_dsn_host||'') + '</div>'
-      : '<div class="status-err" style="font-size:15px;font-weight:700;margin-bottom:6px">✗ Unreachable</div>'
+      : '<div class="status-err" style="font-size:15px;font-weight:700;margin-bottom:6px">Unreachable</div>'
         + '<div class="fs-12 text-muted">' + esc(health.db_dsn_host||'') + '</div>'
         + '<div class="fs-11 status-err" style="margin-top:6px">Check <code>DB_DSN</code> in <code>config/settings.py</code></div>'
     );
@@ -193,7 +193,7 @@
     var errs    = health.last_errors || {};
     var errKeys = Object.keys(errs);
     if (!errKeys.length) {
-      set('debugLastErrors', '<span class="status-ok fs-12">No errors recorded ✓</span>');
+      set('debugLastErrors', '<span class="status-ok fs-12">No errors recorded</span>');
     } else {
       var errRows = errKeys.map(function(ep) {
         return '<tr><td>'+esc(ep)+'</td><td class="status-err" style="word-break:break-all">'+esc(errs[ep])+'</td></tr>';

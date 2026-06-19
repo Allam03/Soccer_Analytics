@@ -1,7 +1,7 @@
 <!-- pages/winprob.html -->
 <div class="model-info" data-model="model5_win_probability"></div>
 <div class="prob-banner">
-  <div class="prob-match">Next Match Prediction • Loading...</div>
+  <div class="prob-match">Loading…</div>
   <div class="prob-values">
     <div>
       <div class="prob-pct team1 shimmer" style="height:52px;width:100px">&nbsp;</div>
@@ -13,15 +13,15 @@
     </div>
     <div>
       <div class="prob-pct team2 shimmer" style="height:52px;width:100px">&nbsp;</div>
-      <div class="prob-team">Opponent Win</div>
+      <div class="prob-team">Loss</div>
     </div>
   </div>
 </div>
-
-<div class="card mb-16">
-  <div class="card-title">Win Probability Timeline (Simulated Match)</div>
-  <div class="chart-wrap" style="height:220px"><canvas id="winProbChart"></canvas></div>
-</div>
+<p class="text-muted fs-11" style="margin:-4px 0 16px">
+  The dataset is historical, so this is not a live next-match forecast: it is the
+  Model 5 pre-match classifier's average win / draw / loss probability for the
+  selected team over the chosen season, shown next to the team's actual record.
+</p>
 
 <div class="card mb-16">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -39,52 +39,42 @@
 
 <div class="two-col">
   <div class="card">
-    <div class="card-title">Key Input Factors</div>
-    <div class="factors-item">
-      <div class="factor-name">Home Advantage</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" style="width:75%"></div></div></div>
-      <div class="factor-val">+15%</div>
-    </div>
-    <div class="factors-item">
-      <div class="factor-name">Recent Form (last 10)</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpFormBar" style="width:0%"></div></div></div>
-      <div class="factor-val" id="wpFormVal">—</div>
-    </div>
-    <div class="factors-item">
-      <div class="factor-name">Expected Goals (per match)</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpXgBar" style="width:0%"></div></div></div>
-      <div class="factor-val" id="wpXgVal">—</div>
-    </div>
-    <div class="factors-item">
-      <div class="factor-name">Squad Availability</div>
-      <div class="factor-bar-wrap"><div class="progress-bar"><div class="progress-fill green" id="wpSquadBar" style="width:0%"></div></div></div>
-      <div class="factor-val" id="wpSquadVal">—</div>
+    <div class="card-title">What the model looks at</div>
+    <p class="text-muted fs-11" style="margin-bottom:12px">
+      The exact pre-match features fed to the classifier, averaged over the
+      selected team and season — its rolling form going into each match.
+    </p>
+    <div id="wpInputs">
+      <div class="text-muted fs-12" style="padding:16px 0;text-align:center">Loading…</div>
     </div>
   </div>
 
   <div class="card">
-    <div class="card-title">Model Accuracy (cross-validated)</div>
+    <div class="card-title">How good is the model?</div>
+    <p class="text-muted fs-11" style="margin-bottom:14px">
+      It picks one of three outcomes (win / draw / loss), so the bar to beat is
+      the majority-class baseline — not 100%. Accuracy is cross-validated
+      (grouped by match, plus a held-out season) and read live from the registry.
+    </p>
+
     <div class="inline-stat">
-      <div class="inline-stat-label">Pre-match accuracy</div>
-      <div class="inline-stat-val text-accent" id="wpAccVal">—</div>
+      <div class="inline-stat-label">Pre-match model<br>
+        <span class="text-muted fs-11">rolling form only</span></div>
+      <div style="text-align:right">
+        <div class="inline-stat-val text-accent" id="wpAccVal">—</div>
+        <div class="text-muted fs-11" id="wpAccBaseline">&nbsp;</div>
+      </div>
     </div>
     <div class="progress-bar mb-16"><div class="progress-fill green" id="wpAccBar" style="width:0%"></div></div>
-    <div class="accuracy-nums">
-      <div class="acc-num">
-        <div class="acc-val pos" id="wpAccCv">—</div>
-        <div class="acc-label">In-game accuracy</div>
-      </div>
-      <div class="acc-num">
-        <div class="acc-val neg" id="wpAccHo">—</div>
-        <div class="acc-label">Held-out 2022</div>
+
+    <div class="inline-stat">
+      <div class="inline-stat-label">In-game model<br>
+        <span class="text-muted fs-11">also sees the live score</span></div>
+      <div style="text-align:right">
+        <div class="inline-stat-val text-cyan" id="wpAccCv">—</div>
+        <div class="text-muted fs-11" id="wpAccCvBaseline">&nbsp;</div>
       </div>
     </div>
-    <div class="divider"></div>
-    <div class="card-title">Methodology</div>
-    <p class="text-muted fs-12" style="line-height:1.6" id="wpCalib">
-      Outcomes are predicted with a GradientBoostingClassifier, validated with
-      StratifiedGroupKFold (grouped by match so no match leaks across folds) and
-      a held-out 2022 season. Accuracy figures come live from the model registry.
-    </p>
+    <div class="progress-bar"><div class="progress-fill green" id="wpAccCvBar" style="width:0%"></div></div>
   </div>
 </div>
