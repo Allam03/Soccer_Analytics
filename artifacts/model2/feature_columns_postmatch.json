@@ -1,0 +1,20 @@
+[
+  "network_density",
+  "clustering_coefficient",
+  "mean_betweenness",
+  "mean_pagerank",
+  "n_nodes",
+  "pass_entropy",
+  "max_edge_share",
+  "hub_dominance",
+  "reciprocity",
+  "weighted_density",
+  "edges_per_player",
+  "centralization_index",
+  "largest_component_ratio",
+  "modularity",
+  "team_xg",
+  "team_xga",
+  "is_home",
+  "opponent_quality"
+]
