@@ -26,6 +26,24 @@ These helpers provide:
                                 turn, so the 2022 result isn't read as the only
                                 out-of-time evidence when one season (2015/16)
                                 dominates the row count.
+  * grouped_cv_clf_multi()   -- classification analogue of grouped_cv_multi():
+                                StratifiedGroupKFold, returns AUC-ROC/AUC-PR.
+  * leave_one_season_out_clf() -- classification analogue of
+                                leave_one_season_out(): AUC-ROC/AUC-PR per
+                                held-out season via predict_proba.
+  * threshold_table()        -- precision/recall/F1/balanced-accuracy/confusion
+                                matrix at a list of probability thresholds, the
+                                basis for picking real-use risk-tier cutoffs
+                                instead of defaulting to 0.5.
+  * recall_at_precision() / precision_at_recall() -- find the operating point
+                                that hits a target on the OTHER metric, since
+                                with a ~10% positive rate AUC-PR-style tradeoffs
+                                are what a real deployment threshold needs.
+  * calibration_summary()    -- Brier score + binned calibration curve, so a
+                                model isn't just ranking correctly (AUC) but
+                                also producing probabilities that mean what
+                                they say (P(injury)=0.3 actually injuring ~30%
+                                of the time).
   * attach_season()          -- map match_id -> season onto a feature frame.
 
 The StatsBomb free data is one full La Liga season (2015/16) + five
@@ -35,7 +53,12 @@ slice with genuine team diversity (used to de-bias Model 5).
 
 import numpy as np
 from sklearn.base import clone
-from sklearn.metrics import get_scorer, mean_absolute_error, mean_squared_error, r2_score
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import (
+    average_precision_score, balanced_accuracy_score, brier_score_loss,
+    confusion_matrix, f1_score, get_scorer, mean_absolute_error,
+    mean_squared_error, precision_score, r2_score, recall_score, roc_auc_score,
+)
 from sklearn.model_selection import (
     cross_val_score, cross_validate, GroupKFold, StratifiedGroupKFold,
 )
@@ -144,3 +167,130 @@ def leave_one_season_out(estimator, X, y, seasons, min_test_rows: int = 30):
             "rmse": float(np.sqrt(mean_squared_error(y[test], pred))),
         })
     return results
+
+
+def grouped_cv_clf_multi(estimator, X, y, groups, n_splits: int = 5):
+    """
+    Classification analogue of grouped_cv_multi(): StratifiedGroupKFold
+    (preserves class balance per fold AND keeps a group, e.g. player_id,
+    from straddling train/test), returns AUC-ROC and AUC-PR in one pass.
+    """
+    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    scoring = {"roc_auc": "roc_auc", "pr_auc": "average_precision"}
+    res = cross_validate(estimator, X, y, cv=cv, groups=groups, scoring=scoring)
+    return {
+        "roc_auc_mean": float(res["test_roc_auc"].mean()),
+        "roc_auc_std":  float(res["test_roc_auc"].std()),
+        "pr_auc_mean":  float(res["test_pr_auc"].mean()),
+        "pr_auc_std":   float(res["test_pr_auc"].std()),
+    }
+
+
+def leave_one_season_out_clf(estimator, X, y, seasons, min_test_rows: int = 30,
+                              min_test_positives: int = 5):
+    """
+    Classification analogue of leave_one_season_out(): trains on all other
+    seasons, scores AUC-ROC/AUC-PR on the held-out one via predict_proba.
+    Seasons with too few rows OR too few positive examples (AUC is undefined
+    with zero positives in the test fold) are skipped.
+    """
+    seasons_arr = np.asarray(seasons)
+    y = np.asarray(y)
+    results = []
+    for season in sorted(set(seasons_arr.tolist())):
+        test = seasons_arr == season
+        n_test = int(test.sum())
+        n_pos = int(y[test].sum())
+        if n_test < min_test_rows or n_pos < min_test_positives or (~test).sum() == 0:
+            results.append({"season": season, "n_test": n_test, "n_pos": n_pos, "skipped": True})
+            continue
+        est = clone(estimator).fit(X[~test], y[~test])
+        proba = est.predict_proba(X[test])[:, 1]
+        results.append({
+            "season": season,
+            "n_test": n_test,
+            "n_pos": n_pos,
+            "roc_auc": float(roc_auc_score(y[test], proba)),
+            "pr_auc":  float(average_precision_score(y[test], proba)),
+        })
+    return results
+
+
+def threshold_table(y_true, y_prob, thresholds):
+    """
+    Precision/recall/F1/balanced-accuracy/confusion-matrix at each of
+    `thresholds`, so a deployment threshold can be picked deliberately
+    instead of defaulting to 0.5 (which is a bad choice at a ~10% positive
+    rate -- the model can have decent ranking ability and still predict
+    "no injury" for almost everyone at 0.5).
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    rows = []
+    for t in thresholds:
+        pred = (y_prob >= t).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+        precision = float(precision_score(y_true, pred, zero_division=0))
+        recall = float(recall_score(y_true, pred, zero_division=0))
+        f1 = float(f1_score(y_true, pred, zero_division=0))
+        bal_acc = float(balanced_accuracy_score(y_true, pred))
+        rows.append({
+            "threshold": float(t), "precision": precision, "recall": recall,
+            "f1": f1, "balanced_accuracy": bal_acc,
+            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn),
+            "flagged_rate": float(pred.mean()),
+        })
+    return rows
+
+
+def recall_at_precision(y_true, y_prob, target_precision: float, n_steps: int = 500):
+    """
+    Highest recall achievable while keeping precision >= target_precision.
+    Returns (recall, precision, threshold) or (None, None, None) if no
+    threshold reaches the target (common when the model's top scores still
+    aren't precise enough -- an honest "not achievable" result, not an error).
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    best = (None, None, None)
+    for t in np.linspace(0.0, 1.0, n_steps):
+        pred = (y_prob >= t).astype(int)
+        if pred.sum() == 0:
+            continue
+        p = precision_score(y_true, pred, zero_division=0)
+        if p >= target_precision:
+            r = recall_score(y_true, pred, zero_division=0)
+            if best[0] is None or r > best[0]:
+                best = (float(r), float(p), float(t))
+    return best
+
+
+def precision_at_recall(y_true, y_prob, target_recall: float, n_steps: int = 500):
+    """
+    Highest precision achievable while keeping recall >= target_recall.
+    Returns (precision, recall, threshold) or (None, None, None).
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    best = (None, None, None)
+    for t in np.linspace(1.0, 0.0, n_steps):
+        pred = (y_prob >= t).astype(int)
+        r = recall_score(y_true, pred, zero_division=0)
+        if r >= target_recall:
+            p = precision_score(y_true, pred, zero_division=0)
+            if best[0] is None or p > best[0]:
+                best = (float(p), float(r), float(t))
+    return best
+
+
+def calibration_summary(y_true, y_prob, n_bins: int = 10):
+    """
+    Brier score (lower is better, 0=perfect) plus a binned calibration curve
+    (mean predicted probability vs. observed positive rate per bin) -- shows
+    whether the model's probabilities are usable as probabilities, which AUC
+    alone never tells you (AUC only cares about rank order).
+    """
+    brier = float(brier_score_loss(y_true, y_prob))
+    obs, pred = calibration_curve(y_true, y_prob, n_bins=n_bins, strategy="quantile")
+    bins = [{"predicted_mean": float(p), "observed_rate": float(o)} for p, o in zip(pred, obs)]
+    return {"brier_score": brier, "bins": bins}

@@ -53,6 +53,10 @@ coverage.xml
 data/
 *.csv
 *.json
+# ...except model output artifacts (e.g. feature_columns_postmatch.json,
+# model2_optimized_metadata.json) -- these are committed results, not raw
+# data/cache, and api_server.py's upgrade path depends on reading them.
+!artifacts/**/*.json
 
 # Environment files
 .env
