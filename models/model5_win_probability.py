@@ -719,7 +719,14 @@ def load_in_game_features_v2(conn) -> pd.DataFrame:
               AND prev_inner.season     = m.season
               AND prev_inner.match_date < m.match_date
         ) oppseason ON TRUE
-        WHERE mms.minute % 5 = 0
+        WHERE (mms.minute % 5 = 0
+               -- always include each match's final snapshot (the true full-time
+               -- minute, e.g. 90+stoppage or the end of extra time) so the
+               -- win-probability curve reaches the actual end of the match and
+               -- reflects stoppage-time goals, not just the last 5-min sample.
+               OR mms.minute = (SELECT MAX(m2.minute)
+                                FROM match_minute_snapshots m2
+                                WHERE m2.match_id = mms.match_id))
           AND mms.minute > 0
         ORDER BY mms.match_id, mms.team_id, mms.minute
     """

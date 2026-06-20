@@ -42,18 +42,19 @@
     ]
   },
   "in_game": {
-    "winner_algorithm": "RandomForest",
+    "winner_algorithm": "GradientBoosting",
     "best_params": {
-      "clf__max_depth": 20,
-      "clf__max_features": "sqrt",
-      "clf__min_samples_leaf": 40,
-      "clf__n_estimators": 203
+      "clf__learning_rate": 0.02235980266720311,
+      "clf__max_depth": 5,
+      "clf__min_samples_leaf": 29,
+      "clf__n_estimators": 159,
+      "clf__subsample": 0.8253152871382157
     },
-    "tuned_cv_accuracy": 0.6346061183819329,
-    "holdout_2022_accuracy": 0.6558872305140961,
-    "holdout_2022_f1_macro": 0.646636738069631,
-    "naive_majority_accuracy": 0.3700228149274811,
-    "n_rows": 73636,
+    "tuned_cv_accuracy": 0.6638310171741809,
+    "holdout_2022_accuracy": 0.6764,
+    "holdout_2022_f1_macro": 0.6586759603298038,
+    "naive_majority_accuracy": 0.36986567783424956,
+    "n_rows": 77128,
     "features": [
       "minute",
       "goals_so_far",

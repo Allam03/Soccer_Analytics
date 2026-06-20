@@ -76,66 +76,66 @@ Naive majority-class accuracy: 0.371
 ==============================================================================
   MODEL 5B -- DYNAMIC (IN-GAME) WIN PROBABILITY -- OPTIMIZED
 ==============================================================================
-Team-minute rows: 73636
-Class balance loss/draw/win: [27236, 19153, 27247] ([37.0, 26.0, 37.0]%)
+Team-minute rows: 77128
+Class balance loss/draw/win: [28516, 20085, 28527] ([37.0, 26.0, 37.0]%)
 New features added: ['opp_red_cards_so_far', 'red_card_diff_so_far', 'avg_xg_last3', 'season_points_per_game', 'opp_season_points_per_game', 'elo_pre', 'opp_elo_pre', 'elo_diff']
 
 ==============================================================================
   5B baseline algorithm comparison (StratifiedGroupKFold(3) by match)
 ==============================================================================
 Naive majority-class accuracy: 0.370
-  GradientBoosting       accuracy=0.623+/-0.010  f1_macro=0.596+/-0.011
-  HistGradientBoosting   accuracy=0.614+/-0.008  f1_macro=0.582+/-0.009
-  RandomForest           accuracy=0.630+/-0.007  f1_macro=0.602+/-0.006
-  -> Best by macro-F1: RandomForest
+  GradientBoosting       accuracy=0.649+/-0.010  f1_macro=0.625+/-0.012
+  HistGradientBoosting   accuracy=0.630+/-0.012  f1_macro=0.602+/-0.015
+  RandomForest           accuracy=0.648+/-0.005  f1_macro=0.623+/-0.005
+  -> Best by macro-F1: GradientBoosting
 
 ==============================================================================
   5B hyperparameter tuning (RandomizedSearchCV, winner only)
 ==============================================================================
-  Best params: {'clf__max_depth': 20, 'clf__max_features': 'sqrt', 'clf__min_samples_leaf': 40, 'clf__n_estimators': 203}
-  Tuned CV accuracy: 0.635
+  Best params: {'clf__learning_rate': 0.02235980266720311, 'clf__max_depth': 5, 'clf__min_samples_leaf': 29, 'clf__n_estimators': 159, 'clf__subsample': 0.8253152871382157}
+  Tuned CV accuracy: 0.664
 
 ==============================================================================
   5B held-out 2022 + leave-one-season-out
 ==============================================================================
-  Held-out 2022 (n=2412): accuracy=0.656  f1_macro=0.647
-  season=2015/2016  n=65116  accuracy=0.610  f1_macro=0.594
-  season=2018       n=2342   accuracy=0.570  f1_macro=0.553
-  season=2020       n=1891   accuracy=0.600  f1_macro=0.586
-  season=2022       n=2412   accuracy=0.656  f1_macro=0.647
-  season=2024       n=1875   accuracy=0.602  f1_macro=0.603
+  Held-out 2022 (n=2500): accuracy=0.676  f1_macro=0.659
+  season=2015/2016  n=68266  accuracy=0.602  f1_macro=0.566
+  season=2018       n=2436   accuracy=0.605  f1_macro=0.574
+  season=2020       n=1977   accuracy=0.631  f1_macro=0.607
+  season=2022       n=2500   accuracy=0.676  f1_macro=0.659
+  season=2024       n=1949   accuracy=0.594  f1_macro=0.589
 
 ==============================================================================
   5B minute-bucket accuracy (out-of-fold, StratifiedGroupKFold(3) by match)
 ==============================================================================
-  minute   1-15   n=  12170  accuracy=0.460
-  minute  16-30   n=  12104  accuracy=0.517
-  minute  31-45   n=  12133  accuracy=0.566
-  minute  46-60   n=  12070  accuracy=0.644
-  minute  61-70   n=   8008  accuracy=0.723
-  minute  71-80   n=   8018  accuracy=0.796  <-- literature target >=0.65 at minute 70+
-  minute  81-90   n=   8059  accuracy=0.888  <-- literature target >=0.65 at minute 70+
+  minute   1-15   n=  12170  accuracy=0.498
+  minute  16-30   n=  12104  accuracy=0.539
+  minute  31-45   n=  12133  accuracy=0.582
+  minute  46-60   n=  12070  accuracy=0.650
+  minute  61-70   n=   8008  accuracy=0.729
+  minute  71-80   n=   8018  accuracy=0.800  <-- literature target >=0.65 at minute 70+
+  minute  81-90   n=   8063  accuracy=0.894  <-- literature target >=0.65 at minute 70+
 
 ==============================================================================
   5B final fit + feature importance
 ==============================================================================
-    0.3726  goal_diff_so_far
-    0.0778  xg_diff_so_far
-    0.0745  goals_so_far
-    0.0628  elo_diff
-    0.0489  opp_elo_pre
-    0.0451  avg_pass_acc_last5
-    0.0451  elo_pre
-    0.0383  avg_xg_last5
-    0.0369  opp_season_points_per_game
-    0.0354  avg_xg_last3
-    0.0341  xg_so_far
-    0.0338  season_points_per_game
-    0.0253  minute
-    0.0244  pass_acc_so_far
-    0.0195  pressures_so_far
-    0.0132  shots_so_far
-    0.0124  is_home
+    0.6615  goal_diff_so_far
+    0.0808  minute
+    0.0525  elo_diff
+    0.0295  opp_elo_pre
+    0.0272  avg_pass_acc_last5
+    0.0239  elo_pre
+    0.0182  avg_xg_last5
+    0.0177  avg_xg_last3
+    0.0165  shots_so_far
+    0.0148  opp_season_points_per_game
+    0.0136  is_home
+    0.0104  pass_acc_so_far
+    0.0104  season_points_per_game
+    0.0095  xg_so_far
+    0.0069  xg_diff_so_far
+    0.0040  pressures_so_far
+    0.0027  goals_so_far
     0.0000  opp_red_cards_so_far
     0.0000  red_card_diff_so_far
     0.0000  red_cards_so_far
