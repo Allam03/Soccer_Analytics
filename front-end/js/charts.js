@@ -361,7 +361,7 @@ const Charts = {
   },
 
   // ── Match xG timeline (cumulative xG race) ────────────────────────────────
-  initMatchTimeline(payload) {
+  initMatchTimeline(payload, xMax = 95) {
     const canvas = document.getElementById('matchTimelineChart');
     if (!canvas || !payload) return;
     destroyChart(canvas);
@@ -423,7 +423,7 @@ const Charts = {
           },
         },
         scales: makeScales({
-          x: { type: 'linear', min: 0, max: 95,
+          x: { type: 'linear', min: 0, max: xMax,
                title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } } },
           y: { min: 0,
                title: { display: true, text: 'Cumulative xG', color: '#4a5568', font: { size: 10 } } },
@@ -436,19 +436,20 @@ const Charts = {
   // Three independent lines (win / draw / loss), each its own 0–100% probability
   // re-estimated every minute. The win line is filled so the team's live chances
   // read at a glance; a dashed marker shows the static pre-match call at kickoff.
-  initWinProbTimeline(payload) {
+  initWinProbTimeline(payload, xMax = 90) {
     const canvas = document.getElementById('winProbTimelineChart');
     if (!canvas || !payload) return;
     destroyChart(canvas);
 
     const series = payload.series || [];
     if (!series.length) return;
-    const mins = series.map(p => p.minute);
     const pre  = payload.prematch;  // {win,draw,loss} or null
 
+    // Linear x ({x:minute,y:value}) so this chart shares an identical 0..xMax
+    // axis with the cumulative-xG chart stacked beneath it.
     const line = (key, label, color, fill) => ({
       label,
-      data: series.map(p => p[key]),
+      data: series.map(p => ({ x: p.minute, y: p[key] })),
       borderColor: color,
       backgroundColor: fill || 'transparent',
       borderWidth: key === 'win' ? 2.5 : 1.6,
@@ -468,7 +469,7 @@ const Charts = {
     if (pre) {
       datasets.push({
         label: 'Pre-match win',
-        data: mins.map(() => pre.win),
+        data: [{ x: 0, y: pre.win }, { x: xMax, y: pre.win }],
         borderColor: 'rgba(56,189,131,0.55)',
         borderWidth: 1.2,
         borderDash: [5, 4],
@@ -480,7 +481,7 @@ const Charts = {
 
     new Chart(canvas.getContext('2d'), {
       type: 'line',
-      data: { labels: mins, datasets },
+      data: { datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -496,13 +497,14 @@ const Charts = {
           tooltip: {
             ...tooltipDefaults,
             callbacks: {
-              title: items => `Minute ${items[0].label}`,
-              label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(0)}%`,
+              title: items => `Minute ${Math.round(items[0].parsed.x)}`,
+              label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.parsed.y).toFixed(0)}%`,
             },
           },
         },
         scales: makeScales({
-          x: { title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } },
+          x: { type: 'linear', min: 0, max: xMax,
+               title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } },
                grid: { display: false } },
           y: { min: 0, max: 100,
                ticks: { color: '#4a5568', font: { size: 10 }, callback: v => `${v}%` },

@@ -850,12 +850,25 @@ function _initMatchSelector() {
 async function _loadMatchTimeline(matchId) {
   if (!matchId) return;
 
+  // Fetch both timelines first so they can share one x-axis range — the in-game
+  // win-probability curve and the cumulative-xG race are stacked for the same
+  // match, so a mismatched axis (e.g. xG to 95', win-prob to 90') reads as a bug.
+  const [wpRes, tlRes] = await Promise.allSettled([
+    ApiService.loadWinProbTimeline(matchId),
+    ApiService.loadMatchTimeline(matchId),
+  ]);
+  const wp = wpRes.status === "fulfilled" ? wpRes.value : null;
+  const tl = tlRes.status === "fulfilled" ? tlRes.value : null;
+
+  // Shared x max = the latest minute either chart actually has data for, but at
+  // least a full 90' (extra-time matches push this to 120'+).
+  const xMax = Math.max(90, _wpMaxMinute(wp), _xgMaxMinute(tl));
+
   // Dynamic in-game win-probability curve (Model 5B) — the primary chart.
-  try {
-    const wp = await ApiService.loadWinProbTimeline(matchId);
-    requestAnimationFrame(() => Charts.initWinProbTimeline(wp));
+  if (wp) {
+    requestAnimationFrame(() => Charts.initWinProbTimeline(wp, xMax));
     const wpSum = document.getElementById("winProbTlSummary");
-    if (wpSum && wp && wp.series && wp.series.length) {
+    if (wpSum && wp.series && wp.series.length) {
       const last = wp.series[wp.series.length - 1];
       const score = (wp.home_score != null)
         ? `${wp.home_name} ${wp.home_score}–${wp.away_score} ${wp.away_name}` : "";
@@ -870,24 +883,37 @@ async function _loadMatchTimeline(matchId) {
     } else if (wpSum) {
       wpSum.textContent = "No in-game snapshots available for this match.";
     }
-  } catch (err) {
-    console.error("[_loadMatchTimeline] win-prob", err);
+  } else {
+    console.error("[_loadMatchTimeline] win-prob", wpRes.reason);
   }
 
   // Supporting cumulative-xG race for the same match.
-  try {
-    const tl = await ApiService.loadMatchTimeline(matchId);
-    requestAnimationFrame(() => Charts.initMatchTimeline(tl));
+  if (tl) {
+    requestAnimationFrame(() => Charts.initMatchTimeline(tl, xMax));
     const summary = document.getElementById("matchXgSummary");
-    if (summary && tl) {
+    if (summary) {
       summary.innerHTML =
         `<strong>${tl.home_name} ${tl.home_score}–${tl.away_score} ${tl.away_name}</strong> · ` +
         `xG ${Number(tl.home_xg).toFixed(2)}–${Number(tl.away_xg).toFixed(2)}. ` +
         `Diamonds mark actual goals; the steeper line created chances faster.`;
     }
-  } catch (err) {
-    console.error("[_loadMatchTimeline] xg", err);
+  } else {
+    console.error("[_loadMatchTimeline] xg", tlRes.reason);
   }
+}
+
+// Latest minute present in each payload, for a shared x-axis.
+function _wpMaxMinute(wp) {
+  const s = wp?.series;
+  return (s && s.length) ? s[s.length - 1].minute : 0;
+}
+function _xgMaxMinute(tl) {
+  if (!tl) return 0;
+  const xs = []
+    .concat(tl.home_series || [], tl.away_series || [],
+            tl.home_goals || [], tl.away_goals || [])
+    .map((p) => Number(p.x) || 0);
+  return xs.length ? Math.max(...xs) : 0;
 }
 
 // ---------------------------------------------------------------------------
