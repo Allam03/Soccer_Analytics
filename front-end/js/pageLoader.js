@@ -8,7 +8,7 @@
    real script and executes it.
    ============================================================ */
 
-const ASSET_VERSION = "2.12.3";
+const ASSET_VERSION = "2.13.0";
 
 const PAGES = [
   { id: "dashboard-content", file: "/static/pages/dashboard.html" },

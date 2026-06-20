@@ -16,6 +16,7 @@ Key design points
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -106,6 +107,18 @@ def _parquet(path) -> pd.DataFrame | None:
         return None
 
 
+def _load_json(path) -> Any:
+    p = Path(path)
+    if not p.exists():
+        logger.debug("JSON not found (skipping): %s", p)
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not load JSON %s: %s", p, exc)
+        return None
+
+
 def _load_all_artifacts() -> None:
     a = ARTIFACT_DIR
     # model1_player_clustering.py (v4.0) is dual-axis: a spatial KMeans (fit on
@@ -128,11 +141,25 @@ def _load_all_artifacts() -> None:
         "feat_df": _parquet(a / "model2" / "graph_features.parquet"),
     }
     _A["m5"] = {
+        # v1 (legacy, kept as a fallback): own-form-only pre-match model.
         "gbc_pre":    _load(a / "model5" / "gbc_pre.pkl"),
         "scaler_pre": _load(a / "model5" / "scaler_pre.pkl"),
         "gbc_ig":     _load(a / "model5" / "gbc_ingame.pkl"),
         "scaler_ig":  _load(a / "model5" / "scaler_ingame.pkl"),
         "df_pre":     _parquet(a / "model5" / "features_pre.parquet"),
+        # v2 (optimized, now the primary path). The pre-match (static) and
+        # in-game (dynamic) sub-models, their scalers, the exact feature-column
+        # order each was trained on, the per-match/per-minute feature tables,
+        # and the training diagnostics metadata (held-out accuracy + baselines).
+        "gbc_pre_v2":    _load(a / "model5" / "gbc_pre_optimized.pkl"),
+        "scaler_pre_v2": _load(a / "model5" / "scaler_pre_optimized.pkl"),
+        "feats_pre_v2":  _load_json(a / "model5" / "feature_columns_pre_optimized.json"),
+        "df_pre_v2":     _parquet(a / "model5" / "features_pre_optimized.parquet"),
+        "gbc_ig_v2":     _load(a / "model5" / "gbc_ingame_optimized.pkl"),
+        "scaler_ig_v2":  _load(a / "model5" / "scaler_ingame_optimized.pkl"),
+        "feats_ig_v2":   _load_json(a / "model5" / "feature_columns_ingame_optimized.json"),
+        "df_ig_v2":      _parquet(a / "model5" / "features_ingame_optimized.parquet"),
+        "meta_v2":       _load_json(a / "model5" / "model5_optimized_metadata.json"),
     }
     _A["mxg"] = {
         "shots": _parquet(a / "model_xg" / "shots_xg.parquet"),
@@ -1378,72 +1405,242 @@ def injury_risk(team_id: int, season: str | None = None) -> dict[str, Any]:
 
 
 # =============================================================================
-# /api/win-probability
+# /api/win-probability  (static, pre-match) + /api/win-probability-timeline
+# (dynamic, in-game) — Model 5's two sub-models.
 # =============================================================================
+
+def _m5_model_block() -> dict[str, Any] | None:
+    """Held-out accuracy + majority-class baseline for both Model 5 sub-models,
+    read from the optimized training metadata so the UI reflects the model that
+    is actually serving predictions (independent of the registry being re-run)."""
+    meta = _A.get("m5", {}).get("meta_v2")
+    if not meta:
+        return None
+    pre = meta.get("pre_match", {})
+    ig  = meta.get("in_game", {})
+    return {
+        "prematch_accuracy":  pre.get("holdout_2022_accuracy"),
+        "prematch_naive":     pre.get("naive_majority_accuracy"),
+        "prematch_algorithm": pre.get("winner_algorithm"),
+        "prematch_features":  len(pre.get("features", []) or []),
+        "ingame_accuracy":    ig.get("holdout_2022_accuracy"),
+        "ingame_naive":       ig.get("naive_majority_accuracy"),
+        "ingame_algorithm":   ig.get("winner_algorithm"),
+        "ingame_features":    len(ig.get("features", []) or []),
+    }
+
+
+@app.get("/api/win-probability-timeline")
+def win_probability_timeline(match_id: int, team_id: int) -> dict[str, Any]:
+    """The DYNAMIC (in-game) win-probability curve for one team in one match.
+
+    Runs Model 5B (the optimized in-game classifier) on every minute snapshot
+    of the match, producing a genuine win/draw/loss probability curve that
+    evolves with the live score and chances — not a hand-rolled formula. The
+    minute-0 point is seeded from the STATIC pre-match model for the same match,
+    so a single chart shows the pre-match call handing off to the live model."""
+    _validate_team_id(team_id)
+    m5 = _A.get("m5", {})
+    ig, scaler, feats, df = (
+        m5.get("gbc_ig_v2"), m5.get("scaler_ig_v2"),
+        m5.get("feats_ig_v2"), m5.get("df_ig_v2"),
+    )
+    if any(x is None for x in (ig, scaler, feats, df)):
+        return {"series": [], "source": "fallback",
+                "note": "in-game model artifacts not loaded"}
+
+    # Match metadata (names, score, which side this team is) for the chart.
+    meta = None
+    if _db_ok():
+        try:
+            rows = _query(
+                """
+                SELECT m.home_team_id, m.away_team_id, m.home_score, m.away_score,
+                       th.team_name AS home_name, ta.team_name AS away_name
+                FROM matches m
+                JOIN teams th ON th.team_id = m.home_team_id
+                JOIN teams ta ON ta.team_id = m.away_team_id
+                WHERE m.match_id = %s
+                """,
+                (match_id,),
+            )
+            meta = rows[0] if rows else None
+        except Exception as exc:
+            logger.warning("/api/win-probability-timeline meta error: %s", exc)
+
+    try:
+        rows = df[(df["match_id"] == match_id) & (df["team_id"] == team_id)]
+        rows = rows.sort_values("minute")
+        if rows.empty:
+            return {"series": [], "source": "fallback",
+                    "note": "no in-game snapshots for this match/team"}
+
+        X = scaler.transform(rows[feats].fillna(0).values)
+        proba = ig.predict_proba(X)
+        cls = list(ig.classes_)
+        idx = {c: i for i, c in enumerate(cls)}
+        series = []
+        for (_, r), p in zip(rows.iterrows(), proba):
+            series.append({
+                "minute":    int(r["minute"]),
+                "win":       round(float(p[idx.get(2, 0)]) * 100, 1),
+                "draw":      round(float(p[idx.get(1, 0)]) * 100, 1),
+                "loss":      round(float(p[idx.get(0, 0)]) * 100, 1),
+                "goal_diff": int(r.get("goal_diff_so_far", 0)),
+            })
+
+        # Seed a minute-0 point from the static pre-match model for this match.
+        pre_point = _m5_prematch_point(match_id, team_id)
+        if pre_point:
+            series.insert(0, {"minute": 0, **pre_point, "goal_diff": 0})
+    except Exception as exc:
+        logger.warning("/api/win-probability-timeline match=%d team=%d error: %s",
+                       match_id, team_id, exc)
+        _last_errors["win_probability_timeline"] = str(exc)
+        return {"series": [], "source": "fallback"}
+
+    out: dict[str, Any] = {"series": series, "match_id": match_id,
+                           "team_id": team_id, "source": "artifact",
+                           "model": _m5_model_block()}
+    if meta:
+        is_home = int(meta["home_team_id"]) == team_id
+        out.update({
+            "home_name":  meta["home_name"],
+            "away_name":  meta["away_name"],
+            "home_score": meta["home_score"],
+            "away_score": meta["away_score"],
+            "team_name":  meta["home_name"] if is_home else meta["away_name"],
+            "opp_name":   meta["away_name"] if is_home else meta["home_name"],
+            "is_home":    is_home,
+        })
+    return out
+
+
+def _m5_prematch_point(match_id: int, team_id: int) -> dict[str, float] | None:
+    """The static (v2) pre-match win/draw/loss for one specific (match, team),
+    used to seed minute 0 of the in-game curve."""
+    m5 = _A.get("m5", {})
+    gbc, scaler, feats, df = (
+        m5.get("gbc_pre_v2"), m5.get("scaler_pre_v2"),
+        m5.get("feats_pre_v2"), m5.get("df_pre_v2"),
+    )
+    if any(x is None for x in (gbc, scaler, feats, df)):
+        return None
+    try:
+        r = df[(df["match_id"] == match_id) & (df["team_id"] == team_id)]
+        if r.empty:
+            return None
+        p = gbc.predict_proba(scaler.transform(r[feats].fillna(0).values))[0]
+        cls = list(gbc.classes_)
+        idx = {c: i for i, c in enumerate(cls)}
+        return {
+            "win":  round(float(p[idx.get(2, 0)]) * 100, 1),
+            "draw": round(float(p[idx.get(1, 0)]) * 100, 1),
+            "loss": round(float(p[idx.get(0, 0)]) * 100, 1),
+        }
+    except Exception:
+        return None
+
 
 @app.get("/api/win-probability")
 def win_probability(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
     season_sql, season_params = _season_filter(season)
 
-    m5     = _A.get("m5", {})
-    gbc    = m5.get("gbc_pre")
-    scaler = m5.get("scaler_pre")
-    df_pre = m5.get("df_pre")
+    m5 = _A.get("m5", {})
 
-    FEATURES_PRE = [
+    # Curated subset of the model's features surfaced to the UI as "what the
+    # model looks at". The optimized (v2) static model adds opponent-relative
+    # form and an Elo rating edge — the headline upgrade over the own-form-only
+    # v1 — so those are highlighted here.
+    INPUT_LABELS_V2 = {
+        "elo_diff":                   "Elo rating edge",
+        "season_points_per_game":     "Season points/game",
+        "opp_season_points_per_game": "Opponent points/game",
+        "avg_xg_last5":               "Avg xG (last 5)",
+        "avg_xg_last5_opp":           "Opponent xG (last 5)",
+        "goal_diff_last5":            "Goal diff (last 5)",
+    }
+    INPUT_LABELS_V1 = {
+        "avg_xg_last5":       "Avg xG (last 5)",
+        "avg_shots_last5":    "Avg shots (last 5)",
+        "avg_pass_acc_last5": "Pass accuracy (last 5)",
+        "avg_pressures_last5": "Avg pressures (last 5)",
+    }
+    FEATURES_PRE_V1 = [
         "avg_xg_last5", "avg_shots_last5", "avg_passes_last5",
         "avg_pass_acc_last5", "avg_tackles_last5", "avg_pressures_last5",
         "red_cards_match", "subs_made", "is_home",
     ]
-    # Subset of the model's features that is meaningful to surface to users as
-    # "what the model looks at" (rolling pre-match form). Labels for the UI.
-    INPUT_LABELS = {
-        "avg_xg_last5":      "Avg xG (last 5)",
-        "avg_shots_last5":   "Avg shots (last 5)",
-        "avg_pass_acc_last5": "Pass accuracy (last 5)",
-        "avg_pressures_last5": "Avg pressures (last 5)",
-    }
 
     win = draw = loss = None
     inputs: dict[str, float] = {}
+    input_labels = INPUT_LABELS_V2
     source = "fallback"
+    model_version = None
 
-    # Primary path: Model 5's own pre-match feature table (features_pre.parquet),
-    # which stores the *correct* rolling-form features it was trained on. We
-    # predict each of the team's matches and average the probabilities — i.e.
-    # "the model's typical pre-match call for this team" — rather than averaging
-    # the inputs and predicting once (which is statistically wrong and was
-    # producing nonsensical draw-heavy numbers).
-    if df_pre is not None and gbc is not None and scaler is not None:
+    def _predict_avg(df, model, scaler, feats):
+        """Average predict_proba over the team's (season-filtered) matches.
+
+        Predicting each match then averaging probabilities — not averaging the
+        inputs and predicting once — is the statistically correct way to get
+        'the model's typical pre-match call for this team'."""
+        rows = df[df["team_id"] == team_id] if "team_id" in df.columns else df
+        if _has_season(season) and "season" in rows.columns:
+            rows = rows[rows["season"] == season]
+        if rows.empty:
+            return None, None
+        X = rows[feats].fillna(0).values
+        proba = model.predict_proba(scaler.transform(X)).mean(axis=0)
+        cls = list(model.classes_)
+        p_map = {c: proba[i] for i, c in enumerate(cls)}
+        return rows, p_map
+
+    # Primary path: the OPTIMIZED v2 static model. Its feature table already
+    # carries each historical match's opponent-relative form and pre-match Elo,
+    # so we get the stronger model's call without needing an opponent parameter.
+    gbc2, sc2, feats2, df2 = (
+        m5.get("gbc_pre_v2"), m5.get("scaler_pre_v2"),
+        m5.get("feats_pre_v2"), m5.get("df_pre_v2"),
+    )
+    if all(x is not None for x in (gbc2, sc2, feats2, df2)):
         try:
-            rows = df_pre[df_pre["team_id"] == team_id] \
-                if "team_id" in df_pre.columns else df_pre
-            if _has_season(season) and "season" in rows.columns:
-                rows = rows[rows["season"] == season]
-
-            if not rows.empty:
-                X = rows[FEATURES_PRE].fillna(0).values
-                proba = gbc.predict_proba(scaler.transform(X)).mean(axis=0)
-                cls = list(gbc.classes_)
-                p_map = {c: proba[i] for i, c in enumerate(cls)}
+            rows, p_map = _predict_avg(df2, gbc2, sc2, feats2)
+            if rows is not None:
                 win  = round(float(p_map.get(2, 0)) * 100, 1)
                 draw = round(float(p_map.get(1, 0)) * 100, 1)
                 loss = round(float(p_map.get(0, 0)) * 100, 1)
                 source = "artifact"
-
-                means = rows[FEATURES_PRE].fillna(0).mean()
-                inputs = {
-                    key: round(float(means.get(key, 0)), 2)
-                    for key in INPUT_LABELS
-                }
+                model_version = "v2-optimized"
+                means = rows[feats2].fillna(0).mean()
+                inputs = {k: round(float(means.get(k, 0)), 2) for k in INPUT_LABELS_V2}
+                input_labels = INPUT_LABELS_V2
                 logger.info(
-                    "/api/win-probability team=%d season=%s: win=%.1f draw=%.1f "
+                    "/api/win-probability team=%d season=%s [v2]: win=%.1f draw=%.1f "
                     "loss=%.1f over %d matches", team_id, season, win, draw, loss, len(rows),
                 )
         except Exception as exc:
-            logger.warning("/api/win-probability team=%d artifact error: %s", team_id, exc)
+            logger.warning("/api/win-probability team=%d v2 error: %s", team_id, exc)
             _last_errors["win_probability"] = str(exc)
+
+    # Fallback: the legacy v1 own-form-only model.
+    if win is None:
+        gbc, scaler, df_pre = m5.get("gbc_pre"), m5.get("scaler_pre"), m5.get("df_pre")
+        if all(x is not None for x in (gbc, scaler, df_pre)):
+            try:
+                rows, p_map = _predict_avg(df_pre, gbc, scaler, FEATURES_PRE_V1)
+                if rows is not None:
+                    win  = round(float(p_map.get(2, 0)) * 100, 1)
+                    draw = round(float(p_map.get(1, 0)) * 100, 1)
+                    loss = round(float(p_map.get(0, 0)) * 100, 1)
+                    source = "artifact"
+                    model_version = "v1"
+                    means = rows[FEATURES_PRE_V1].fillna(0).mean()
+                    inputs = {k: round(float(means.get(k, 0)), 2) for k in INPUT_LABELS_V1}
+                    input_labels = INPUT_LABELS_V1
+            except Exception as exc:
+                logger.warning("/api/win-probability team=%d v1 error: %s", team_id, exc)
+                _last_errors["win_probability"] = str(exc)
 
     # Fallback: no model/feature artifact — use the team's actual outcome rates.
     if win is None and _db_ok():
@@ -1486,9 +1683,11 @@ def win_probability(team_id: int, season: str | None = None) -> dict[str, Any]:
         "headline": {"win": win, "draw": draw, "loss": loss},
         "record": record,
         "inputs": [
-            {"key": k, "label": INPUT_LABELS[k], "value": inputs[k]}
-            for k in INPUT_LABELS if k in inputs
+            {"key": k, "label": input_labels[k], "value": inputs[k]}
+            for k in input_labels if k in inputs
         ],
+        "model": _m5_model_block(),
+        "model_version": model_version,
         "season": season if _has_season(season) else None,
         "source": source,
     }

@@ -432,6 +432,73 @@ const Charts = {
     });
   },
 
+  // ── In-game win probability (Model 5B, dynamic) ──────────────────────────
+  // 100%-stacked area of win / draw / loss over the match minutes. The series'
+  // minute-0 point is the static pre-match model's call, so the chart shows the
+  // pre-match prediction handing off to the live in-game model.
+  initWinProbTimeline(payload) {
+    const canvas = document.getElementById('winProbTimelineChart');
+    if (!canvas || !payload) return;
+    destroyChart(canvas);
+
+    const series = payload.series || [];
+    if (!series.length) return;
+    const mins = series.map(p => p.minute);
+    const line = (key, color, fillBelow) => ({
+      label: key === 'win' ? 'Win' : key === 'draw' ? 'Draw' : 'Loss',
+      data: series.map(p => p[key]),
+      borderColor: color,
+      backgroundColor: fillBelow,
+      borderWidth: 2,
+      fill: true,
+      stack: 'wp',
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      tension: 0.25,
+    });
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: mins,
+        datasets: [
+          line('win',  C.accent, 'rgba(56,189,131,0.30)'),
+          line('draw', '#8896aa', 'rgba(136,150,170,0.22)'),
+          line('loss', C.red,    'rgba(239,68,68,0.22)'),
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: {
+              title: items => items[0].label === '0'
+                ? "Pre-match (minute 0)" : `Minute ${items[0].label}`,
+              label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(0)}%`,
+            },
+          },
+        },
+        scales: makeScales({
+          x: { title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } },
+               grid: { display: false } },
+          y: { min: 0, max: 100, stacked: true,
+               ticks: { color: '#4a5568', font: { size: 10 }, callback: v => `${v}%` },
+               title: { display: true, text: 'Win probability', color: '#4a5568', font: { size: 10 } } },
+        }),
+      },
+    });
+  },
+
   // ── Generic histogram / bar (EDA distributions) ───────────────────────────
   initSimpleBar(canvasId, labels, values, color = C.cyan, opts = {}) {
     const canvas = document.getElementById(canvasId);

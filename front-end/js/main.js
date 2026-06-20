@@ -729,12 +729,13 @@ function renderWinProbFactors() {
       : '<div class="text-muted fs-12" style="padding:16px 0;text-align:center">No model inputs for this selection</div>';
   }
 
-  // Cross-validated accuracy — from the Model 5 registry entry. Each model is
-  // shown against the same majority-class baseline so the numbers are readable.
+  // Accuracy for both sub-models. Prefer the metrics block returned by
+  // /api/win-probability (the optimized model that is actually serving
+  // predictions); fall back to the registry entry if it's absent.
   const m5 = (AppState.models?.models || []).find(
     (m) => m.model_key === "model5_win_probability"
   );
-  const me = m5?.metrics;
+  const me = AppState.winprob?.model || m5?.metrics;
   if (!me) return;
 
   const baselineTxt = (naive) =>
@@ -848,6 +849,29 @@ function _initMatchSelector() {
 
 async function _loadMatchTimeline(matchId) {
   if (!matchId) return;
+
+  // Dynamic in-game win-probability curve (Model 5B) — the primary chart.
+  try {
+    const wp = await ApiService.loadWinProbTimeline(matchId);
+    requestAnimationFrame(() => Charts.initWinProbTimeline(wp));
+    const wpSum = document.getElementById("winProbTlSummary");
+    if (wpSum && wp && wp.series && wp.series.length) {
+      const last = wp.series[wp.series.length - 1];
+      const score = (wp.home_score != null)
+        ? `${wp.home_name} ${wp.home_score}–${wp.away_score} ${wp.away_name}` : "";
+      wpSum.innerHTML =
+        `<strong>${wp.team_name || getSelectedTeamName()}</strong> win probability over the match` +
+        (score ? ` · final: ${score}` : "") +
+        `. By full time the live model reads <strong>${last.win}% win / ${last.draw}% draw / ${last.loss}% loss</strong>. ` +
+        `Minute 0 is the static pre-match call; every later point also sees the live score.`;
+    } else if (wpSum) {
+      wpSum.textContent = "No in-game snapshots available for this match.";
+    }
+  } catch (err) {
+    console.error("[_loadMatchTimeline] win-prob", err);
+  }
+
+  // Supporting cumulative-xG race for the same match.
   try {
     const tl = await ApiService.loadMatchTimeline(matchId);
     requestAnimationFrame(() => Charts.initMatchTimeline(tl));
@@ -859,7 +883,7 @@ async function _loadMatchTimeline(matchId) {
         `Diamonds mark actual goals; the steeper line created chances faster.`;
     }
   } catch (err) {
-    console.error("[_loadMatchTimeline]", err);
+    console.error("[_loadMatchTimeline] xg", err);
   }
 }
 

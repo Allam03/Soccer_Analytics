@@ -110,6 +110,11 @@ const ApiService = {
     return this.request(`/match-xg-timeline?match_id=${matchId}`);
   },
 
+  // Dynamic (in-game) win-probability curve for the active team in one match.
+  async loadWinProbTimeline(matchId) {
+    return this.request(`/win-probability-timeline?match_id=${matchId}&team_id=${this.teamId}`);
+  },
+
   // EDA and model-registry data are team-independent (whole-dataset views).
   async loadEDA() {
     return this.request(`/eda`);

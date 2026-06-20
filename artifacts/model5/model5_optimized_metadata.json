@@ -1,16 +1,15 @@
 {
   "pre_match": {
-    "winner_algorithm": "GradientBoosting",
+    "winner_algorithm": "RandomForest",
     "best_params": {
-      "clf__learning_rate": 0.011049202253484457,
-      "clf__max_depth": 4,
-      "clf__min_samples_leaf": 17,
-      "clf__n_estimators": 262,
-      "clf__subsample": 0.9160702162124823
+      "clf__max_depth": 20,
+      "clf__max_features": null,
+      "clf__min_samples_leaf": 11,
+      "clf__n_estimators": 187
     },
-    "tuned_cv_accuracy": 0.4948774553438965,
-    "holdout_2022_accuracy": 0.4609375,
-    "holdout_2022_f1_macro": 0.3678528162097023,
+    "tuned_cv_accuracy": 0.47565960477123015,
+    "holdout_2022_accuracy": 0.6015625,
+    "holdout_2022_f1_macro": 0.5654346720060396,
     "naive_majority_accuracy": 0.3709206039941549,
     "n_rows": 4106,
     "features": [
@@ -45,14 +44,14 @@
   "in_game": {
     "winner_algorithm": "RandomForest",
     "best_params": {
-      "clf__max_depth": null,
+      "clf__max_depth": 20,
       "clf__max_features": "sqrt",
-      "clf__min_samples_leaf": 25,
-      "clf__n_estimators": 202
+      "clf__min_samples_leaf": 40,
+      "clf__n_estimators": 203
     },
-    "tuned_cv_accuracy": 0.6416799165696149,
-    "holdout_2022_accuracy": 0.6645936981757877,
-    "holdout_2022_f1_macro": 0.6539071016315209,
+    "tuned_cv_accuracy": 0.6346061183819329,
+    "holdout_2022_accuracy": 0.6558872305140961,
+    "holdout_2022_f1_macro": 0.646636738069631,
     "naive_majority_accuracy": 0.3700228149274811,
     "n_rows": 73636,
     "features": [

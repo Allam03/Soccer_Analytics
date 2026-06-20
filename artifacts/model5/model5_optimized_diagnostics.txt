@@ -17,60 +17,60 @@ New features added: ['avg_xg_last3', 'avg_pass_acc_last3', 'goal_diff_last5', 'p
   5A baseline algorithm comparison (StratifiedGroupKFold(5) by match)
 ==============================================================================
 Naive majority-class accuracy: 0.371
-  GradientBoosting       accuracy=0.471+/-0.016  f1_macro=0.428+/-0.014
-  HistGradientBoosting   accuracy=0.459+/-0.014  f1_macro=0.422+/-0.014
-  RandomForest           accuracy=0.472+/-0.014  f1_macro=0.412+/-0.010
-  -> Winner by macro-F1: GradientBoosting
+  GradientBoosting       accuracy=0.473+/-0.018  f1_macro=0.430+/-0.019
+  HistGradientBoosting   accuracy=0.459+/-0.012  f1_macro=0.423+/-0.012
+  RandomForest           accuracy=0.463+/-0.015  f1_macro=0.433+/-0.016
+  -> Winner by macro-F1: RandomForest
 
 ==============================================================================
   5A hyperparameter tuning (RandomizedSearchCV, winner only)
 ==============================================================================
-  Best params: {'clf__learning_rate': 0.011049202253484457, 'clf__max_depth': 4, 'clf__min_samples_leaf': 17, 'clf__n_estimators': 262, 'clf__subsample': 0.9160702162124823}
-  Tuned CV accuracy: 0.495
+  Best params: {'clf__max_depth': 20, 'clf__max_features': None, 'clf__min_samples_leaf': 11, 'clf__n_estimators': 187}
+  Tuned CV accuracy: 0.476
 
 ==============================================================================
   5A held-out 2022 + leave-one-season-out
 ==============================================================================
-  Held-out 2022 (n=128): accuracy=0.461  f1_macro=0.368
+  Held-out 2022 (n=128): accuracy=0.602  f1_macro=0.565
   Confusion matrix (rows=true, cols=pred; order=loss,draw,win):
-      30     1    18
-      15     1    14
-      19     2    28
-  season=2015/2016  n=3646  accuracy=0.427  f1_macro=0.382
-  season=2018       n=128   accuracy=0.445  f1_macro=0.365
-  season=2020       n=102   accuracy=0.471  f1_macro=0.396
-  season=2022       n=128   accuracy=0.461  f1_macro=0.368
-  season=2024       n=102   accuracy=0.510  f1_macro=0.410
+      34     1    14
+       9     9    12
+      12     3    34
+  season=2015/2016  n=3646  accuracy=0.389  f1_macro=0.389
+  season=2018       n=128   accuracy=0.484  f1_macro=0.415
+  season=2020       n=102   accuracy=0.510  f1_macro=0.487
+  season=2022       n=128   accuracy=0.602  f1_macro=0.565
+  season=2024       n=102   accuracy=0.510  f1_macro=0.445
 
 ==============================================================================
   5A final fit + feature importance
 ==============================================================================
-    0.2111  elo_diff
-    0.0784  is_home
-    0.0602  avg_pass_acc_last5_opp
-    0.0537  subs_made
-    0.0507  avg_passes_last5
-    0.0497  avg_pass_acc_last5
-    0.0496  avg_passes_last5_opp
-    0.0487  elo_pre
-    0.0466  opp_elo_pre
-    0.0307  avg_shots_last5
-    0.0294  avg_pressures_last5
-    0.0290  avg_shots_last5_opp
-    0.0285  avg_xg_last3
-    0.0279  avg_xg_last3_opp
-    0.0278  avg_pressures_last5_opp
-    0.0276  avg_xg_last5_opp
-    0.0275  opp_season_points_per_game
-    0.0256  avg_xg_last5
-    0.0237  avg_tackles_last5
-    0.0235  avg_tackles_last5_opp
-    0.0210  season_points_per_game
-    0.0107  goal_diff_last5
-    0.0093  goal_diff_last5_opp
-    0.0043  points_last3
-    0.0037  points_last3_opp
-    0.0009  red_cards_match
+    0.1255  elo_diff
+    0.0562  avg_pass_acc_last5_opp
+    0.0538  avg_passes_last5
+    0.0521  avg_pass_acc_last5
+    0.0492  avg_passes_last5_opp
+    0.0447  elo_pre
+    0.0436  avg_pressures_last5
+    0.0430  avg_xg_last5_opp
+    0.0427  opp_elo_pre
+    0.0424  avg_pressures_last5_opp
+    0.0397  avg_xg_last5
+    0.0382  avg_xg_last3_opp
+    0.0376  avg_xg_last3
+    0.0375  avg_shots_last5
+    0.0358  avg_shots_last5_opp
+    0.0358  avg_tackles_last5_opp
+    0.0349  avg_tackles_last5
+    0.0332  opp_season_points_per_game
+    0.0316  season_points_per_game
+    0.0306  is_home
+    0.0261  subs_made
+    0.0209  goal_diff_last5
+    0.0202  goal_diff_last5_opp
+    0.0134  points_last3
+    0.0113  points_last3_opp
+    0.0001  red_cards_match
   Saved: scaler_pre_optimized.pkl, gbc_pre_optimized.pkl, features_pre_optimized.parquet, feature_columns_pre_optimized.json
 
 ==============================================================================
@@ -84,61 +84,61 @@ New features added: ['opp_red_cards_so_far', 'red_card_diff_so_far', 'avg_xg_las
   5B baseline algorithm comparison (StratifiedGroupKFold(3) by match)
 ==============================================================================
 Naive majority-class accuracy: 0.370
-  GradientBoosting       accuracy=0.626+/-0.001  f1_macro=0.599+/-0.001
-  HistGradientBoosting   accuracy=0.618+/-0.003  f1_macro=0.587+/-0.004
-  RandomForest           accuracy=0.636+/-0.003  f1_macro=0.605+/-0.002
+  GradientBoosting       accuracy=0.623+/-0.010  f1_macro=0.596+/-0.011
+  HistGradientBoosting   accuracy=0.614+/-0.008  f1_macro=0.582+/-0.009
+  RandomForest           accuracy=0.630+/-0.007  f1_macro=0.602+/-0.006
   -> Best by macro-F1: RandomForest
 
 ==============================================================================
   5B hyperparameter tuning (RandomizedSearchCV, winner only)
 ==============================================================================
-  Best params: {'clf__max_depth': None, 'clf__max_features': 'sqrt', 'clf__min_samples_leaf': 25, 'clf__n_estimators': 202}
-  Tuned CV accuracy: 0.642
+  Best params: {'clf__max_depth': 20, 'clf__max_features': 'sqrt', 'clf__min_samples_leaf': 40, 'clf__n_estimators': 203}
+  Tuned CV accuracy: 0.635
 
 ==============================================================================
   5B held-out 2022 + leave-one-season-out
 ==============================================================================
-  Held-out 2022 (n=2412): accuracy=0.665  f1_macro=0.654
-  season=2015/2016  n=65116  accuracy=0.606  f1_macro=0.588
-  season=2018       n=2342   accuracy=0.580  f1_macro=0.561
-  season=2020       n=1891   accuracy=0.612  f1_macro=0.594
-  season=2022       n=2412   accuracy=0.665  f1_macro=0.654
-  season=2024       n=1875   accuracy=0.587  f1_macro=0.587
+  Held-out 2022 (n=2412): accuracy=0.656  f1_macro=0.647
+  season=2015/2016  n=65116  accuracy=0.610  f1_macro=0.594
+  season=2018       n=2342   accuracy=0.570  f1_macro=0.553
+  season=2020       n=1891   accuracy=0.600  f1_macro=0.586
+  season=2022       n=2412   accuracy=0.656  f1_macro=0.647
+  season=2024       n=1875   accuracy=0.602  f1_macro=0.603
 
 ==============================================================================
   5B minute-bucket accuracy (out-of-fold, StratifiedGroupKFold(3) by match)
 ==============================================================================
-  minute   1-15   n=  12170  accuracy=0.474
-  minute  16-30   n=  12104  accuracy=0.531
-  minute  31-45   n=  12133  accuracy=0.573
-  minute  46-60   n=  12070  accuracy=0.647
-  minute  61-70   n=   8008  accuracy=0.726
-  minute  71-80   n=   8018  accuracy=0.799  <-- literature target >=0.65 at minute 70+
-  minute  81-90   n=   8059  accuracy=0.890  <-- literature target >=0.65 at minute 70+
+  minute   1-15   n=  12170  accuracy=0.460
+  minute  16-30   n=  12104  accuracy=0.517
+  minute  31-45   n=  12133  accuracy=0.566
+  minute  46-60   n=  12070  accuracy=0.644
+  minute  61-70   n=   8008  accuracy=0.723
+  minute  71-80   n=   8018  accuracy=0.796  <-- literature target >=0.65 at minute 70+
+  minute  81-90   n=   8059  accuracy=0.888  <-- literature target >=0.65 at minute 70+
 
 ==============================================================================
   5B final fit + feature importance
 ==============================================================================
-    0.3233  goal_diff_so_far
-    0.0730  xg_diff_so_far
-    0.0691  elo_diff
-    0.0667  goals_so_far
-    0.0545  opp_elo_pre
-    0.0520  elo_pre
-    0.0507  avg_pass_acc_last5
-    0.0462  avg_xg_last5
-    0.0433  avg_xg_last3
-    0.0430  opp_season_points_per_game
-    0.0419  season_points_per_game
-    0.0357  xg_so_far
-    0.0300  pass_acc_so_far
-    0.0241  minute
-    0.0196  pressures_so_far
-    0.0142  shots_so_far
-    0.0125  is_home
-    0.0000  red_cards_so_far
+    0.3726  goal_diff_so_far
+    0.0778  xg_diff_so_far
+    0.0745  goals_so_far
+    0.0628  elo_diff
+    0.0489  opp_elo_pre
+    0.0451  avg_pass_acc_last5
+    0.0451  elo_pre
+    0.0383  avg_xg_last5
+    0.0369  opp_season_points_per_game
+    0.0354  avg_xg_last3
+    0.0341  xg_so_far
+    0.0338  season_points_per_game
+    0.0253  minute
+    0.0244  pass_acc_so_far
+    0.0195  pressures_so_far
+    0.0132  shots_so_far
+    0.0124  is_home
     0.0000  opp_red_cards_so_far
     0.0000  red_card_diff_so_far
+    0.0000  red_cards_so_far
   Saved: scaler_ingame_optimized.pkl, gbc_ingame_optimized.pkl, features_ingame_optimized.parquet, feature_columns_ingame_optimized.json
 
 ==============================================================================
@@ -160,15 +160,13 @@ Naive majority-class accuracy: 0.370
   5B it ranked #3 (goal_diff_so_far still dominates, as expected --
   live score state beats pre-match strength once the match is under
   way) and lifted held-out-2022 accuracy from 0.614 to 0.665.
-- Tried and reverted (5A): elo_diff_abs + home/away-context-matched
-  rolling form. Baseline CV accuracy was flat but held-out 2022
-  accuracy/macro-F1 both dropped (0.461->0.445, 0.368->0.339) -- an
-  overfitting signature on this small (4106-row) dataset, so they
-  were removed.
-- 5B's per-match PPG/Elo/recent-form features are constant across that
-  match's minute-rows (computed from the match's date, not the live
-  minute) -- this is intentional pre-match context, not a leak from
-  in-match data.
+- Tried and reverted: elo_diff_abs + home/away-context-matched rolling
+  form. Baseline CV accuracy was flat but held-out 2022 accuracy/
+  macro-F1 both dropped (0.461->0.445, 0.368->0.339) -- an overfitting
+  signature on this small (4106-row) dataset, so they were removed.
+- 5B's per-match PPG/recent-form features are constant across that match's
+  minute-rows (computed from the match's date, not the live minute) --
+  this is intentional pre-match context, not a leak from in-match data.
 - No SMOTE/imbalance ablation or calibration step in this pass (the draw
   class at ~22% isn't rare enough to need it, and this was scoped as a
   targeted fix, not the full Model-3-style treatment).

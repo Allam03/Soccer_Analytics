@@ -130,3 +130,11 @@ single source of truth for dataset scope (currently: full 2015/16 season of the 
   order, and caches resolved coordinates back into `stadiums`; a handful of stadiums (renamed/demolished
   venues, training-ground "stadiums") are unresolvable and simply have no weather rows — this is expected,
   not a bug to chase.
+- **Model artifacts are keyed to the local DB's SERIAL ids and are NOT portable.** Any prediction/feature
+  parquet that carries `match_id`/`team_id`/`player_id` (e.g. `artifacts/model5/features_*_optimized.parquet`,
+  `model2/graph_features.parquet`, `model_xg/shots_xg.parquet`) is keyed by ids that a *different* ingest run
+  assigns differently. Never pull these from a teammate's machine/commit and serve them against your own DB —
+  the ids silently won't line up (you'll serve the wrong team/match). After re-ingesting, or when an artifact
+  was generated elsewhere, regenerate it locally (`python main.py --train`, or a single model e.g.
+  `python -m models.model5_win_probability --optimize`). The `.pkl` estimators themselves are fine (trained on
+  feature *values*); it's the id-keyed tables that drift.
