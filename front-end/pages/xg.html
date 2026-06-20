@@ -24,7 +24,10 @@
 </div>
 
 <div class="card mb-16">
-  <div class="card-title">Shot Map — all shots, sized by xG</div>
+  <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+    <span>Shot Map — sized by xG</span>
+    <span id="shotMapSel" class="text-muted fs-11"></span>
+  </div>
   <div class="shot-map-wrap">
     <canvas id="shotMapChart"></canvas>
   </div>

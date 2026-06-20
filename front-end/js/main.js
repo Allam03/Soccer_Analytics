@@ -428,20 +428,69 @@ function renderPlayer() {
   const leader  = data.leader  || {};
   const players = data.players || [];
 
+  const tbody = document.querySelector("#page-player table tbody");
+  if (tbody) {
+    tbody.innerHTML = players.map((p, i) => `
+      <tr class="clickable" data-idx="${i}" title="Click to view ${p.player_name}">
+        <td class="fw-700">${p.player_name}</td>
+        <td>${p.position || "-"}</td>
+        <td>${p.player_type || "-"}</td>
+        <td>${p.matches || 0}</td>
+        <td>${(p.xg_per_90 || 0).toFixed(2)}</td>
+        <td>${(p.xa_per_90 || 0).toFixed(2)}</td>
+        <td>${(p.pass_completion || 0).toFixed(1)}%</td>
+        <td>${(p.key_passes || 0).toFixed(1)}</td>
+      </tr>
+    `).join("");
+
+    tbody.querySelectorAll("tr.clickable").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        const idx = Number(tr.dataset.idx);
+        if (!Number.isNaN(idx) && players[idx]) _selectPlayer(players[idx], players);
+      });
+    });
+  }
+
+  // Default selection: the leader (top player), or first row.
+  _selectPlayer(leader.player_name ? leader : players[0] || {}, players);
+}
+
+// Build a radar payload from a single player row, mirroring the server's
+// _build_radar() so an arbitrary clicked player renders identically to the
+// leader the API pre-computes.
+function _playerRadar(p) {
+  return {
+    labels: ["xG", "xA", "Passing", "Key Passes", "Dribbles", "Shots"],
+    values: [
+      Math.min(100, +(((p.xg_per_90 || 0) * 100).toFixed(1))),
+      Math.min(100, +(((p.xa_per_90 || 0) * 100).toFixed(1))),
+      +((p.pass_completion || 0).toFixed(1)),
+      Math.min(100, +(((p.key_passes || 0) * 25).toFixed(1))),
+      Math.min(100, +(((p.dribbles || 0) * 20).toFixed(1))),
+      Math.min(100, +(((p.shots || 0) * 20).toFixed(1))),
+    ],
+  };
+}
+
+// Render the profile card, metric grid, radar and cluster highlight for a
+// single player. Reused by the default (leader) render and by table clicks.
+function _selectPlayer(player, players) {
+  if (!player) return;
+
   const nameEl   = document.querySelector("#page-player .player-name");
   const metaEl   = document.querySelector("#page-player .player-meta");
   const avatarEl = document.querySelector("#page-player .player-avatar");
-  if (nameEl)   nameEl.textContent   = leader.player_name || "Top Player";
-  if (metaEl)   metaEl.textContent   = `${leader.position || "-"} • ${getSelectedTeamName()}`;
-  if (avatarEl) avatarEl.textContent = getInitials(leader.player_name || "");
+  if (nameEl)   nameEl.textContent   = player.player_name || "Top Player";
+  if (metaEl)   metaEl.textContent   = `${player.position || "-"} • ${getSelectedTeamName()}`;
+  if (avatarEl) avatarEl.textContent = getInitials(player.player_name || "");
 
   const statsRow = document.querySelector("#page-player .player-stats-row");
   if (statsRow) {
     statsRow.innerHTML = `
-      <div class="stat-item">Type <span>${leader.player_type || "Midfielder"}</span></div>
-      <div class="stat-item">Matches <span>${leader.matches || 0}</span></div>
-      <div class="stat-item">Minutes <span>${Math.round(leader.minutes || 0).toLocaleString()}</span></div>
-      <div class="stat-item">xG <span>${(leader.xg_per_90 || 0).toFixed(2)}</span></div>
+      <div class="stat-item">Type <span>${player.player_type || "Midfielder"}</span></div>
+      <div class="stat-item">Matches <span>${player.matches || 0}</span></div>
+      <div class="stat-item">Minutes <span>${Math.round(player.minutes || 0).toLocaleString()}</span></div>
+      <div class="stat-item">xG <span>${(player.xg_per_90 || 0).toFixed(2)}</span></div>
     `;
   }
 
@@ -451,49 +500,49 @@ function renderPlayer() {
     const avgXA = _teamAvg(players, "xa_per_90");
     const avgPA = _teamAvg(players, "pass_completion");
     const avgKP = _teamAvg(players, "key_passes");
-    const deltaXG = _delta(leader.xg_per_90,      avgXG);
-    const deltaXA = _delta(leader.xa_per_90,       avgXA);
-    const deltaPA = _delta(leader.pass_completion, avgPA);
-    const deltaKP = _delta(leader.key_passes,      avgKP);
+    const deltaXG = _delta(player.xg_per_90,      avgXG);
+    const deltaXA = _delta(player.xa_per_90,       avgXA);
+    const deltaPA = _delta(player.pass_completion, avgPA);
+    const deltaKP = _delta(player.key_passes,      avgKP);
 
     metricsGrid.innerHTML = `
       <div class="metric-card">
-        <div class="metric-val text-accent">${(leader.xg_per_90 || 0).toFixed(2)}</div>
+        <div class="metric-val text-accent">${(player.xg_per_90 || 0).toFixed(2)}</div>
         <div class="metric-label">xG per 90</div>
         <div class="metric-delta ${deltaXG >= 0 ? "pos" : "neg"}">${deltaXG >= 0 ? "+" : ""}${deltaXG.toFixed(0)}% vs avg</div>
       </div>
       <div class="metric-card">
-        <div class="metric-val text-cyan">${(leader.xa_per_90 || 0).toFixed(2)}</div>
+        <div class="metric-val text-cyan">${(player.xa_per_90 || 0).toFixed(2)}</div>
         <div class="metric-label">xA per 90</div>
         <div class="metric-delta ${deltaXA >= 0 ? "pos" : "neg"}">${deltaXA >= 0 ? "+" : ""}${deltaXA.toFixed(0)}% vs avg</div>
       </div>
       <div class="metric-card">
-        <div class="metric-val">${(leader.pass_completion || 0).toFixed(1)}%</div>
+        <div class="metric-val">${(player.pass_completion || 0).toFixed(1)}%</div>
         <div class="metric-label">Pass Completion</div>
         <div class="metric-delta ${deltaPA >= 0 ? "pos" : "neg"}">${deltaPA >= 0 ? "+" : ""}${deltaPA.toFixed(0)}% vs avg</div>
       </div>
       <div class="metric-card">
-        <div class="metric-val text-amber">${(leader.key_passes || 0).toFixed(1)}</div>
+        <div class="metric-val text-amber">${(player.key_passes || 0).toFixed(1)}</div>
         <div class="metric-label">Key Passes</div>
         <div class="metric-delta ${deltaKP >= 0 ? "pos" : "neg"}">${deltaKP >= 0 ? "+" : ""}${deltaKP.toFixed(0)}% vs avg</div>
       </div>
       <div class="metric-card">
-        <div class="metric-val">${(leader.dribbles || 0).toFixed(1)}</div>
+        <div class="metric-val">${(player.dribbles || 0).toFixed(1)}</div>
         <div class="metric-label">Dribbles</div>
       </div>
       <div class="metric-card">
-        <div class="metric-val">${(leader.shots || 0).toFixed(1)}</div>
+        <div class="metric-val">${(player.shots || 0).toFixed(1)}</div>
         <div class="metric-label">Shots per 90</div>
       </div>
     `;
   }
 
   requestAnimationFrame(() => {
-    Charts.initRadar(data.radar, leader.player_name || "Top Player");
+    Charts.initRadar(_playerRadar(player), player.player_name || "Player");
   });
 
   const clusterGrid = document.querySelector("#page-player .cluster-grid");
-  if (clusterGrid && players.length) {
+  if (clusterGrid && players && players.length) {
     const groups = {};
     for (const p of players) {
       const t = p.player_type || "Unclassified";
@@ -514,7 +563,7 @@ function renderPlayer() {
 
     clusterGrid.innerHTML = Object.entries(groups).slice(0, 4).map(([type, names]) => {
       const c = colorFor(type);
-      const isSelected = names.includes(leader.player_name);
+      const isSelected = names.includes(player.player_name);
       return `
         <div class="cluster-card${isSelected ? " selected" : ""}"
              style="border-left:3px solid ${c.border}">
@@ -529,20 +578,14 @@ function renderPlayer() {
     }).join("");
   }
 
+  // Highlight the selected row in the table.
   const tbody = document.querySelector("#page-player table tbody");
   if (tbody) {
-    tbody.innerHTML = players.map((p) => `
-      <tr>
-        <td class="fw-700">${p.player_name}</td>
-        <td>${p.position || "-"}</td>
-        <td>${p.player_type || "-"}</td>
-        <td>${p.matches || 0}</td>
-        <td>${(p.xg_per_90 || 0).toFixed(2)}</td>
-        <td>${(p.xa_per_90 || 0).toFixed(2)}</td>
-        <td>${(p.pass_completion || 0).toFixed(1)}%</td>
-        <td>${(p.key_passes || 0).toFixed(1)}</td>
-      </tr>
-    `).join("");
+    tbody.querySelectorAll("tr").forEach((tr) => {
+      const idx = Number(tr.dataset.idx);
+      const isSel = players[idx] && players[idx].player_name === player.player_name;
+      tr.classList.toggle("row-selected", !!isSel);
+    });
   }
 }
 
@@ -645,9 +688,44 @@ function renderXG() {
   }
   if (values[3]) values[3].textContent = String(kpi.shots || 0);
 
+  const allShots = AppState.shotmap?.shots || [];
+  let selectedPlayer = null;   // null = show every shot
+
+  const selEl = document.querySelector("#page-xg #shotMapSel");
+
+  // Redraw the shot map for the current selection and update the caption +
+  // selected-row highlight. Clicking the active player again clears the filter.
+  const drawShotMap = () => {
+    const shots = selectedPlayer
+      ? allShots.filter((s) => s.player_name === selectedPlayer)
+      : allShots;
+    Charts.initShotMap(shots);
+
+    if (selEl) {
+      if (selectedPlayer) {
+        selEl.innerHTML =
+          `${selectedPlayer} · ${shots.length} shot${shots.length === 1 ? "" : "s"} ` +
+          `· <a href="#" id="shotMapClear" style="color:var(--accent)">show all</a>`;
+        const clr = selEl.querySelector("#shotMapClear");
+        if (clr) clr.addEventListener("click", (e) => {
+          e.preventDefault();
+          selectedPlayer = null;
+          drawShotMap();
+        });
+      } else {
+        selEl.textContent = "all players · click a row to filter";
+      }
+    }
+
+    const body = document.querySelector("#page-xg table tbody");
+    if (body) body.querySelectorAll("tr").forEach((tr) => {
+      tr.classList.toggle("row-selected", tr.dataset.player === selectedPlayer);
+    });
+  };
+
   requestAnimationFrame(() => {
     Charts.initXGChart(players.slice(0, 10));
-    Charts.initShotMap(AppState.shotmap?.shots || []);
+    drawShotMap();
   });
 
   const tbody = document.querySelector("#page-xg table tbody");
@@ -659,7 +737,7 @@ function renderXG() {
         const d = Number(p.xg_diff || 0);
         const color = d >= 0 ? "var(--accent)" : "var(--red)";
         return `
-          <tr>
+          <tr class="clickable" data-player="${p.player_name}" title="Click to map ${p.player_name}'s shots">
             <td class="fw-700">${p.player_name}</td>
             <td>${p.position || "-"}</td>
             <td>${p.shots || 0}</td>
@@ -668,6 +746,14 @@ function renderXG() {
             <td style="color:${color};font-weight:600">${d >= 0 ? "+" : ""}${d.toFixed(2)}</td>
           </tr>`;
       }).join("");
+
+      tbody.querySelectorAll("tr.clickable").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const name = tr.dataset.player;
+          selectedPlayer = selectedPlayer === name ? null : name;
+          drawShotMap();
+        });
+      });
     }
   }
 }

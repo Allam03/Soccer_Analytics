@@ -262,6 +262,16 @@
   background: var(--accent-dim);
 }
 
+/* Clickable rows (drill-down to a single player) */
+.data-table tbody tr.clickable {
+  cursor: pointer;
+}
+
+.data-table tbody tr.row-selected td {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .data-table tr:last-child td {
   border-bottom: none;
 }
