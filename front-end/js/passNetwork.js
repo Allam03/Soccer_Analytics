@@ -75,6 +75,11 @@ const PassNetwork = {
         size:      8 + (n.volume / maxVol) * 14,
         highlight: n.volume === maxVol,
         label:     _initials(n.name),
+        full:      n.name,
+        // True season totals from the DB. The drawn edge list is capped, so a
+        // node's real volume/degree must come from here, not from its edges.
+        volume:    n.volume,
+        degree:    n.degree,
       };
     }
     const maxW = Math.max(...edges.map(e => e.weight || 1), 1);
@@ -221,9 +226,11 @@ const PassNetwork = {
       // Label font scales with node radius so initials stay inside the marker.
       const fs = Math.max(8, Math.min(12, n.size * 0.72));
       // Hover data: full name + real passing volume / degree for this node.
+      // Prefer the node's true season volume (from the API) over the edge-summed
+      // value, since the edge list is capped and undercounts top passers.
       const full = esc(n.full || id);
-      const v    = Math.round(vol[id] || n.volume || 0);
-      const d    = (links[id]?.size) || 0;
+      const v    = Math.round(n.volume != null ? n.volume : (vol[id] || 0));
+      const d    = n.degree != null ? n.degree : ((links[id]?.size) || 0);
       const hover = `data-name="${full}" data-vol="${v}" data-deg="${d}" `
         + `onmousemove="PassNetwork._tip(event)" onmouseleave="PassNetwork._hideTip()"`;
       html += `

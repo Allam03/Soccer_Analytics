@@ -6,9 +6,8 @@
 --   sb_*_id       StatsBomb source identifier
 --   tm_*_id       Transfermarkt source identifier
 --
--- Sources: StatsBomb event data (primary) + Transfermarkt CSVs (injuries).
--- The Open-Meteo (weather) source and its table/columns were removed: never
--- populated for this dataset and the model that used it did not generalise.
+-- Sources: StatsBomb event data (primary) + Transfermarkt CSVs (injuries) +
+-- Open-Meteo historical weather (one row per match, keyed by stadium coords).
 --
 -- injuries.injury_date is NOT NULL: the UNIQUE (player_id, injury_date,
 -- injury_type) constraint is only effective when injury_date is non-NULL,
@@ -51,7 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_players_tm        ON players (tm_player_id);
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS stadiums (
     stadium_id      SERIAL  PRIMARY KEY,
-    stadium_name    TEXT    NOT NULL UNIQUE
+    stadium_name    TEXT    NOT NULL UNIQUE,
+    stadium_lat     FLOAT,
+    stadium_lng     FLOAT
 );
 
 CREATE INDEX IF NOT EXISTS idx_stadiums_name ON stadiums (stadium_name);
@@ -79,6 +80,24 @@ CREATE INDEX IF NOT EXISTS idx_matches_home_team   ON matches (home_team_id);
 CREATE INDEX IF NOT EXISTS idx_matches_away_team   ON matches (away_team_id);
 CREATE INDEX IF NOT EXISTS idx_matches_sb          ON matches (sb_match_id);
 CREATE INDEX IF NOT EXISTS idx_matches_stadium     ON matches (stadium_id);
+
+
+-- -----------------------------------------------------------------------------
+-- WEATHER  (one row per match, from Open-Meteo historical archive)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS weather (
+    weather_id          SERIAL  PRIMARY KEY,
+    match_id            INT     NOT NULL REFERENCES matches (match_id) ON DELETE CASCADE,
+    temperature_c       FLOAT,
+    humidity_pct        FLOAT,
+    wind_speed_kmh      FLOAT,
+    precipitation_mm    FLOAT,
+    weather_condition   TEXT    CHECK (
+        weather_condition IN ('clear', 'rain', 'heavy_rain', 'windy', 'cold', 'hot')
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weather_match ON weather (match_id);
 
 
 -- -----------------------------------------------------------------------------
@@ -111,6 +130,7 @@ CREATE TABLE IF NOT EXISTS player_match_stats (
     player_id               INT     NOT NULL REFERENCES players (player_id),
     match_id                INT     NOT NULL REFERENCES matches  (match_id),
     team_id                 INT             REFERENCES teams    (team_id),
+    weather_id              INT             REFERENCES weather  (weather_id),
 
     result                  TEXT,
 
@@ -151,6 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_pms_match        ON player_match_stats (match_id)
 CREATE INDEX IF NOT EXISTS idx_pms_team         ON player_match_stats (team_id);
 CREATE INDEX IF NOT EXISTS idx_pms_player_match ON player_match_stats (player_id, match_id);
 CREATE INDEX IF NOT EXISTS idx_pms_team_match   ON player_match_stats (team_id,   match_id);
+-- idx_pms_weather is created in the MIGRATIONS section, after weather_id exists.
 
 
 -- -----------------------------------------------------------------------------
@@ -300,3 +321,16 @@ CREATE TABLE IF NOT EXISTS model_registry (
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_registry_key ON model_registry (model_key);
+
+
+-- =============================================================================
+-- MIGRATIONS (idempotent)
+--
+-- The CREATE TABLE statements above use IF NOT EXISTS, so they do NOT alter
+-- tables that already exist. These ALTERs add the weather-related columns to a
+-- pre-existing database without dropping data; they are no-ops on a fresh build.
+-- =============================================================================
+ALTER TABLE stadiums           ADD COLUMN IF NOT EXISTS stadium_lat FLOAT;
+ALTER TABLE stadiums           ADD COLUMN IF NOT EXISTS stadium_lng FLOAT;
+ALTER TABLE player_match_stats ADD COLUMN IF NOT EXISTS weather_id  INT REFERENCES weather (weather_id);
+CREATE INDEX IF NOT EXISTS idx_pms_weather ON player_match_stats (weather_id);

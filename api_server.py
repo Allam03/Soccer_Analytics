@@ -316,7 +316,7 @@ def health() -> dict[str, Any]:
     table_counts: dict[str, Any] = {}
     if db_reachable:
         for tbl in (
-            "teams", "players", "matches", "stadiums",
+            "teams", "players", "matches", "stadiums", "weather",
             "player_match_stats", "shots", "injuries", "player_match_features",
             "pass_network_edges", "match_minute_snapshots",
         ):
@@ -831,6 +831,33 @@ def team_cohesion(team_id: int, season: str | None = None) -> dict[str, Any]:
             "y":      round(float(r["y"]), 1),
             "volume": int(r["volume"]),
         } for r in node_rows if r["x"] is not None and r["y"] is not None]
+
+        # True passing degree per player = number of distinct team-mates they
+        # exchange passes with (as passer OR receiver), over the whole season.
+        # Derived directly from the full edge table — NOT the capped edge list
+        # the frontend draws — so the "Best Connected" table is accurate.
+        deg_rows = _query(
+            """
+            SELECT p.player_name AS name, COUNT(DISTINCT t.partner) AS degree
+            FROM (
+                SELECT pne.passer_id AS player, pne.receiver_id AS partner
+                FROM pass_network_edges pne
+                JOIN matches m ON m.match_id = pne.match_id
+                WHERE pne.team_id = %s""" + season_sql + """ AND pne.pass_count > 0
+                UNION
+                SELECT pne.receiver_id AS player, pne.passer_id AS partner
+                FROM pass_network_edges pne
+                JOIN matches m ON m.match_id = pne.match_id
+                WHERE pne.team_id = %s""" + season_sql + """ AND pne.pass_count > 0
+            ) t
+            JOIN players p ON p.player_id = t.player
+            GROUP BY p.player_name
+            """,
+            tuple([team_id] + season_params + [team_id] + season_params),
+        )
+        deg_by_name = {r["name"]: int(r["degree"]) for r in deg_rows}
+        for n in nodes:
+            n["degree"] = deg_by_name.get(n["name"], 0)
     except Exception as exc:
         logger.warning("/api/team-cohesion team=%d node error: %s", team_id, exc)
 
@@ -847,7 +874,7 @@ def team_cohesion(team_id: int, season: str | None = None) -> dict[str, Any]:
             WHERE pne.team_id = %s""" + season_sql + """
             GROUP BY p1.player_name, p2.player_name
             ORDER BY AVG(pne.pass_count) DESC
-            LIMIT 20
+            LIMIT 40
             """,
             tuple([team_id] + season_params),
         )

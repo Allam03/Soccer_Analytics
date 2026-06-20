@@ -257,14 +257,21 @@ async function refreshAllData() {
     .filter((r) => r.status === "fulfilled")
     .map((r) => r.value?.source)
     .filter(Boolean);
-  const hasError    = results.some((r) => r.status === "rejected");
-  const allDB       = sources.every((s) => s.startsWith("database"));
-  const allFallback = sources.every((s) => s === "fallback");
+  // Source labels: every endpoint reports where its data came from. A healthy
+  // app combines live SQL ("database*") with trained-model artifacts (e.g. the
+  // win-probability classifier reports "artifact"). That combination is the
+  // normal state — only flag "demo"/"error" when data is actually missing.
+  const hasError     = results.some((r) => r.status === "rejected");
+  const anyFallback  = sources.some((s) => s.includes("fallback"));
+  const allFallback  = sources.length > 0 && sources.every((s) => s === "fallback");
+  const allDbExact   = sources.length > 0 && sources.every((s) => s === "database");
 
   updateDataSourceBadge(
-    hasError      ? "error"    :
-    allDB         ? "database" :
-    allFallback   ? "fallback" : "mixed"
+    hasError      ? "error"             :
+    allFallback   ? "fallback"          :
+    anyFallback   ? "fallback+artifact" :
+    allDbExact    ? "database"          :
+    "database+artifact"
   );
 
   document.querySelectorAll(".kpi-value").forEach((el) => el.classList.remove("shimmer"));
@@ -567,27 +574,19 @@ function renderCohesion() {
     );
   });
 
-  if (data.edges && data.edges.length) {
-    _renderCohesionCards(data.edges);
+  if (data.nodes && data.nodes.length) {
+    _renderCohesionCards(data.nodes);
   }
 }
 
-// Honest per-player metrics derived from the returned pass-edge list:
-//  • involvement = total passes a player is part of (made + received)
-//  • degree      = number of distinct team-mates they exchange passes with
+// Honest per-player metrics taken straight from the API's node list, which is
+// computed over the FULL season pass table (not the capped edge list the graph
+// draws), so the numbers match reality:
+//  • volume = total passes the player made over the season
+//  • degree = number of distinct team-mates they exchange passes with
 // No max-normalised "centrality" (which by construction always made the top
 // player exactly 1.00); the displayed values are real counts.
-function _renderCohesionCards(edges) {
-  const involvement = {};   // name -> total passes in + out
-  const links       = {};   // name -> Set of distinct partners
-  for (const e of edges) {
-    const w = e.weight || 1;
-    involvement[e.from] = (involvement[e.from] || 0) + w;
-    involvement[e.to]   = (involvement[e.to]   || 0) + w;
-    (links[e.from] = links[e.from] || new Set()).add(e.to);
-    (links[e.to]   = links[e.to]   || new Set()).add(e.from);
-  }
-
+function _renderCohesionCards(nodes) {
   const listHTML = (rows) => rows.map(([name, primary, sub]) => `
       <div class="player-list-item">
         <div>
@@ -601,11 +600,11 @@ function _renderCohesionCards(edges) {
   if (centralCard) {
     const titleHTML = centralCard.querySelector(".card-title")?.outerHTML
       || '<div class="card-title">Most Involved Players</div>';
-    const rows = Object.entries(involvement)
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([name, v]) => [name,
-        `${Math.round(v)} <span class="text-muted fs-11">passes</span>`,
-        `${(links[name]?.size || 0)} team-mates linked`]);
+    const rows = [...nodes]
+      .sort((a, b) => (b.volume || 0) - (a.volume || 0)).slice(0, 5)
+      .map((n) => [n.name,
+        `${Math.round(n.volume || 0)} <span class="text-muted fs-11">passes</span>`,
+        `${n.degree || 0} team-mates linked`]);
     centralCard.innerHTML = titleHTML + listHTML(rows);
   }
 
@@ -613,12 +612,11 @@ function _renderCohesionCards(edges) {
   if (connCard) {
     const titleHTML = connCard.querySelector(".card-title")?.outerHTML
       || '<div class="card-title">Best Connected Players</div>';
-    const rows = Object.entries(links)
-      .map(([name, set]) => [name, set.size])
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([name, deg]) => [name,
-        `${deg} <span class="text-muted fs-11">links</span>`,
-        `${Math.round(involvement[name] || 0)} passes`]);
+    const rows = [...nodes]
+      .sort((a, b) => (b.degree || 0) - (a.degree || 0)).slice(0, 5)
+      .map((n) => [n.name,
+        `${n.degree || 0} <span class="text-muted fs-11">links</span>`,
+        `${Math.round(n.volume || 0)} passes`]);
     connCard.innerHTML = titleHTML + listHTML(rows);
   }
 }
@@ -1208,7 +1206,6 @@ function updateDataSourceBadge(source) {
     "database+model4":     { text: "Data: DB + Model 4", color: "#22d3ee" },
     "database+model5":     { text: "Data: DB + Model 5", color: "#22d3ee" },
     artifact:              { text: "Data: ML Artifact",  color: "#f59e0b" },
-    mixed:                 { text: "Data: Mixed",        color: "#22d3ee" },
     fallback:              { text: "Data: Demo",         color: "#f59e0b" },
     "fallback+artifact":   { text: "Data: Demo + Model", color: "#f59e0b" },
     error:                 { text: "Data: Error",        color: "#ef4444" },

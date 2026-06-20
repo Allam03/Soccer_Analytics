@@ -36,6 +36,7 @@ def verify(conn):
         "matches", "pass_network_edges", "match_minute_snapshots",
         "player_match_stats", "player_match_features", "injuries",
         "players", "teams", "stadiums", "shots", "model_registry",
+        "weather",
     } - set(tables)
     if missing:
         logger.error("Missing tables: %s", missing)

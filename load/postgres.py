@@ -21,6 +21,37 @@ def upsert_stadium(conn, stadium_name: str) -> int:
         return cur.fetchone()[0]
 
 
+def upsert_weather(conn, match_id: int, weather: dict) -> int:
+    """Insert or update a weather row for a match. Returns weather_id.
+
+    Does not commit — the caller owns the transaction so weather writes can be
+    batched. `weather` keys: temperature_c, humidity_pct, wind_speed_kmh,
+    precipitation_mm, weather_condition.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO weather (
+                match_id, temperature_c, humidity_pct,
+                wind_speed_kmh, precipitation_mm, weather_condition
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (match_id) DO UPDATE
+                SET temperature_c     = EXCLUDED.temperature_c,
+                    humidity_pct      = EXCLUDED.humidity_pct,
+                    wind_speed_kmh    = EXCLUDED.wind_speed_kmh,
+                    precipitation_mm  = EXCLUDED.precipitation_mm,
+                    weather_condition = EXCLUDED.weather_condition
+            RETURNING weather_id
+        """, (
+            match_id,
+            weather.get("temperature_c"),
+            weather.get("humidity_pct"),
+            weather.get("wind_speed_kmh"),
+            weather.get("precipitation_mm"),
+            weather.get("weather_condition"),
+        ))
+        return cur.fetchone()[0]
+
+
 def upsert_match(conn, row: dict) -> int:
     """Insert or update one match row. Returns match_id. Does not commit.
 
