@@ -421,3 +421,205 @@ GOTCHAS
    meaningfully but not dramatically better than that. Don't present
    risk_score as a confident probability of injury -- present it as a
    relative ranking/tier, which is what the risk tiers in GOTCHA 5 are for.
+
+
+
+
+MODEL 5A -- BACKEND INTEGRATION INSTRUCTIONS
+===============================================
+(Win Probability -- STATIC / pre-match sub-model only. 5B, the dynamic/
+in-game sub-model, is a separate model with its own artifacts and is not
+covered by this section.)
+
+
+THERE ARE TWO MODEL 5A ARTIFACT SETS
+----------------------------------------
+v1 (production, ALREADY wired into api_server.py -- no action needed)
+  artifacts/model5/gbc_pre.pkl
+  artifacts/model5/scaler_pre.pkl
+  artifacts/model5/features_pre.parquet
+
+v2 / "optimized" (built but NOT wired into api_server.py -- see "HOW TO
+  UPGRADE" below; read GOTCHA 1 before attempting this one, it is NOT a
+  drop-in swap like Model 2's was)
+  artifacts/model5/gbc_pre_optimized.pkl
+  artifacts/model5/scaler_pre_optimized.pkl
+  artifacts/model5/feature_columns_pre_optimized.json
+  artifacts/model5/features_pre_optimized.parquet
+  artifacts/model5/model5_optimized_diagnostics.txt
+  artifacts/model5/model5_optimized_metadata.json
+
+Both are genuine pre-match forecasts (no in-match data in either) -- the
+difference is v1 only looks at the requesting team's own recent form; v2
+adds the opponent's form, season-to-date points-per-game, and an Elo
+rating for both teams. v2 is the methodologically stronger model, but it
+needs information the current endpoint doesn't collect (see GOTCHA 1).
+
+
+WHAT THE MODEL PRODUCES (v1, currently served)
+-------------------------------------------------
+artifacts/model5/features_pre.parquet -- one row per (match_id, team_id).
+Multiclass target: loss=0, draw=1, win=2 (RESULT_MAP in
+models/model5_win_probability.py). predict_proba()'s column order follows
+gbc.classes_, NOT necessarily [0,1,2] -- always map via classes_, never by
+position (api_server.py already does this correctly, keep that pattern).
+
+gbc_pre.pkl + scaler_pre.pkl expect EXACTLY this 9-feature vector, in this
+order (hardcoded in TWO places in api_server.py -- the /api/win-probability
+handler AND _m5_win_pct_direct(), used by /api/dashboard; keep both in sync
+if you ever change models/model5_win_probability.py's FEATURES_PRE_MATCH):
+
+  avg_xg_last5, avg_shots_last5, avg_passes_last5, avg_pass_acc_last5,
+  avg_tackles_last5, avg_pressures_last5, red_cards_match, subs_made,
+  is_home
+
+Note what is absent: there is no opponent feature of any kind. v1 predicts
+a team's win/draw/loss distribution from its own recent form alone.
+
+
+HOW TO SERVE IT (v1)
+-----------------------
+Already implemented in api_server.py:
+  - gbc_pre.pkl, scaler_pre.pkl, features_pre.parquet (as df_pre) are
+    loaded once at startup into the _A["m5"] dict (see _load_all_artifacts()).
+  - GET /api/win-probability?team_id=N tries, in order: (a) a live DB query
+    averaging the team's last 5 player_match_stats rows, scaled + scored
+    via gbc_pre/scaler_pre with red_cards_match/subs_made hardcoded to
+    0/3 and is_home hardcoded to 1; (b) the same features pulled from the
+    in-memory df_pre parquet if the DB path fails; (c) a deterministic
+    fallback formula keyed only on team_id if both fail. Always check
+    the response's "source" field (database+model5 / database / artifact /
+    fallback) before trusting win/draw/loss as model output.
+  - The per-minute win/draw/loss series returned alongside win/draw/loss is
+    NOT model output at any point -- it's a hand-rolled linear curve
+    (win + (minute-45)*0.08 etc., see win_probability()'s last ~10 lines).
+    Model 5B (the real in-game model, gbc_ingame.pkl) is trained but never
+    called here. Don't describe the in-game curve in the UI as coming from
+    the model.
+Do NOT re-run the model per request -- it's a batch artifact, same pattern
+as Models 1-3.
+
+
+HOW TO UPGRADE TO v2 (optional -- not done yet, and NOT a drop-in swap)
+----------------------------------------------------------------------------
+  1. Load the new artifacts at startup:
+       gbc_pre_v2    = _load(a / "model5" / "gbc_pre_optimized.pkl")
+       scaler_pre_v2 = _load(a / "model5" / "scaler_pre_optimized.pkl")
+       with open(a / "model5" / "feature_columns_pre_optimized.json") as f:
+           PRE_FEATURES_V2 = json.load(f)   # 26 features, EXACT order matters
+
+  2. Replace the hardcoded FEATURES_PRE lists in BOTH /api/win-probability
+     and _m5_win_pct_direct() with PRE_FEATURES_V2 loaded above. Do not
+     hand-type this list -- 2 of the 28 originally engineered candidates
+     (avg_pass_acc_last3, avg_pass_acc_last3_opp) were dropped by a
+     multicollinearity audit, so the saved list is shorter than the full
+     feature-engineering description in model5_optimized_diagnostics.txt.
+
+  3. PRE_FEATURES_V2 is, in order:
+       avg_xg_last5, avg_shots_last5, avg_passes_last5, avg_pass_acc_last5,
+       avg_tackles_last5, avg_pressures_last5, red_cards_match, subs_made,
+       is_home, avg_xg_last3, goal_diff_last5, points_last3,
+       season_points_per_game, opp_season_points_per_game,
+       avg_xg_last5_opp, avg_shots_last5_opp, avg_passes_last5_opp,
+       avg_pass_acc_last5_opp, avg_tackles_last5_opp, avg_pressures_last5_opp,
+       avg_xg_last3_opp, goal_diff_last5_opp, points_last3_opp,
+       elo_pre, opp_elo_pre, elo_diff
+
+  4. Keep v1 artifacts in place even after upgrading the live endpoint.
+
+
+ENDPOINTS
+-----------
+  GET /api/win-probability?team_id=N   -- already implemented (see api_server.py)
+    Returns: win/draw/loss percentages, a 91-point per-minute series, source.
+
+No new endpoint is required to keep serving v1. Upgrading to v2 WITHOUT
+adding an opponent parameter is possible but wastes most of v2's value
+(see GOTCHA 1) -- if you upgrade, add opponent_team_id as a required query
+param at the same time:
+  GET /api/win-probability?team_id=N&opponent_team_id=M
+
+
+WHEN DOES THE DATA UPDATE
+----------------------------
+The pipeline is run manually, not on a schedule:
+
+  v1 (production):              python -m models.model5_win_probability
+  v2 (optimized, both modes):   python -m models.model5_win_probability --optimize
+  v2 (optimized, 5A only):      python -m models.model5_win_probability --optimize --mode pre
+
+Each run overwrites its own artifact set and report:
+  v1 report: (printed to console/log only, no file)
+  v2 report: artifacts/model5/model5_optimized_diagnostics.txt (covers
+             5A and 5B in one file -- look for the "MODEL 5A" header)
+
+Re-run v1 (and reload api_server.py's in-memory artifacts, or restart the
+process) any time player_match_stats/matches change -- e.g. after a fresh
+`python main.py` ingestion run.
+
+There is no live inference -- everything is batch, same as Models 1-3.
+
+
+GOTCHAS
+---------
+1. v2 NEEDS AN OPPONENT -- THE CURRENT ENDPOINT DOESN'T COLLECT ONE
+   /api/win-probability's signature is win_probability(team_id: int) --
+   there is no opponent parameter anywhere in the request. 17 of v2's 26
+   features are opponent-relative (every *_opp column, plus elo_diff and
+   season_points_per_game's partner opp_season_points_per_game). If you
+   wire in v2 without adding an opponent_team_id parameter, you would have
+   to zero-fill or guess every opponent feature, which throws away most of
+   why v2 outperforms v1 (see GOTCHA 3). This is the central design change
+   needed before v2 is worth deploying -- it is not just a file swap like
+   Model 2's v1->v2 upgrade was.
+
+2. elo_pre/opp_elo_pre/elo_diff ARE NOT A SIMPLE SQL LOOKUP
+   Unlike every other v2 feature (which is some AVG()/SUM() over recent
+   matches, computable per-request), Elo is a STATEFUL, ITERATIVE rating:
+   each team's current Elo depends on the full chronological sequence of
+   every match it has ever played in this dataset, updated one match at a
+   time (see _compute_elo_ratings() in models/model5_win_probability.py).
+   You cannot reconstruct a team's current rating from a single SQL query.
+   Two options for serving this live:
+     a) Call _compute_elo_ratings(conn) at request time and take the last
+        row for each team_id -- correct, but recomputes the full match
+        history (all ~2000+ matches) on every request. Fine for batch,
+        too slow for a hot endpoint at scale.
+     b) (Recommended) Have the training pipeline write a small
+        "team_id -> current_elo" snapshot (table or JSON) after each run,
+        and have the API look that up instead of recomputing from scratch.
+        This file does not exist yet -- you would need to add it.
+   K=20, home-advantage=100 elo points convention -- if you build a live
+   updater instead of just snapshotting, replicate the exact same K/HFA/
+   goal-diff-multiplier constants or ratings will silently diverge from
+   what the model was trained on.
+
+3. FEATURE ORDER MUST MATCH TRAINING ORDER
+   Same rule as Models 2/3: v1's order is fixed by FEATURES_PRE_MATCH in
+   models/model5_win_probability.py (hardcoded in TWO places in
+   api_server.py -- keep both in sync). v2's order must be read from
+   feature_columns_pre_optimized.json at startup, never hand-typed.
+
+4. NaN HANDLING
+   Both pipelines fillna(0) before scaling/predicting. A team with no
+   match history yet (or, for v2, an opponent with no history) will
+   silently predict from a near-zero feature vector rather than erroring
+   -- treat that as a signal to fall back to v1 or the dashboard's
+   existing fallback formula rather than trusting the prediction.
+
+5. THE IN-GAME CURVE IN THE CURRENT RESPONSE IS NOT A MODEL PREDICTION
+   See "HOW TO SERVE IT" above -- the per-minute series in the existing
+   /api/win-probability response is a hardcoded formula, not Model 5B's
+   output. Wiring up the real in-game model (gbc_ingame.pkl / v2's
+   gbc_ingame_optimized.pkl) is a separate task from this one.
+
+6. SCALE OF THE NUMBERS
+   v2's held-out-2022 accuracy is ~0.46 against a naive (always-predict-
+   majority-class) baseline of ~0.37 -- a real but modest lift, not a
+   confident predictor. The draw class in particular is almost never
+   correctly predicted on held-out data (see the confusion matrix in
+   model5_optimized_diagnostics.txt) -- this is a well-known limitation in
+   football outcome forecasting generally, not a bug. Present win/draw/
+   loss percentages as directional, not as confident probabilities, and
+   don't be surprised if "draw" stays under-represented in predictions
+   even when it's the right call.
