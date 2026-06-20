@@ -1,6 +1,36 @@
 # Soccer Analytics ML Pipeline
 
-A data pipeline and machine learning system built on StatsBomb open data, Open-Meteo historical weather, and Transfermarkt injury records. It ingests match events, computes per-player statistics, links injury history, and trains five models covering player clustering, team cohesion, injury risk prediction, environmental impact, and win probability. A FastAPI backend exposes all five models through a live analytics dashboard.
+A data pipeline and machine learning system built on StatsBomb open data and
+Transfermarkt injury records. It ingests match events, computes per-player
+statistics, links injury history, and trains five models covering player
+clustering, team cohesion, injury risk, win probability, and a from-scratch
+expected-goals (xG) model. A FastAPI backend serves everything through a live
+single-page analytics dashboard with dedicated **EDA** and **Models &
+Methodology** pages.
+
+---
+
+## Model persistence (hybrid registry)
+
+Trained model **binaries** (`.pkl`) and derived **parquet** files are written to
+`artifacts/model{1,2,3,5,_xg}/` on disk — the standard place for sklearn /
+xgboost estimators. In addition, training records a queryable record of every
+model in PostgreSQL:
+
+- **`model_registry`** table — one row per trained model: algorithm, target,
+  feature list (`JSONB`), evaluation metrics (`JSONB`, e.g. ROC-AUC, silhouette,
+  R², accuracy, held-out scores), training row count, sklearn version, artifact
+  path, and timestamp. Upserted on `(model_key, version)`.
+- **Prediction tables** — each model's derived tabular output (player cluster
+  assignments, per-shot xG predictions, feature matrices) is loaded into its own
+  Postgres table (`model1_player_clusters`, `xg_shot_predictions`,
+  `model2_graph_features`, `model3_features`, `model5_features_pre`). These are
+  created dynamically from the DataFrame schema by `core/registry.replace_table()`.
+
+This is what powers the **Models** page (`/api/models`) and the model metrics
+shown across the dashboard. Persistence runs from `main.py` after each model's
+`run()`; a DB hiccup never aborts training because the on-disk artifacts are
+written first. See `core/registry.py`.
 
 ---
 
@@ -20,11 +50,11 @@ pip install -r requirements.txt
 ```
 
 Copy the example env file and fill in your values:
-Edit .env — set DB_DSN, DATA_ROOT, TRANSFERMARKT_CSV, TRANSFERMARKT_PLAYERS_CSV
+Edit `.env` — set `DB_DSN`, `DATA_ROOT`, `TRANSFERMARKT_CSV`, `TRANSFERMARKT_PLAYERS_CSV`
 
 ### 2. Create the database schema
 
-Run once before anything else:
+Run once before anything else (creates all tables, including `model_registry`):
 
 ```bash
 python init_db.py
@@ -36,7 +66,8 @@ python init_db.py
 python main.py
 ```
 
-This runs all four ingestion and labelling stages in order. To also train the ML models:
+This runs all ingestion and labelling stages in order. To also train the ML
+models and populate the model registry + prediction tables:
 
 ```bash
 python main.py --train
@@ -53,7 +84,7 @@ Open **http://localhost:8000** in your browser.
 ### Other pipeline flags
 
 ```
---skip-ingest     Skip ingestion (steps 1–3), run only labels and optional training
+--skip-ingest     Skip ingestion, run only labels and optional training
 --workers N       Set number of parallel worker processes (default: CPU count − 1)
 ```
 
@@ -61,7 +92,7 @@ Open **http://localhost:8000** in your browser.
 
 ```bash
 python -m pipelines.ingest_statsbomb   # StatsBomb events, players, teams, pass networks
-python -m pipelines.ingest_weather     # Historical weather from Open-Meteo
+python -m pipelines.extract_shots      # Shot events + freeze-frame features (xG inputs)
 python -m pipelines.ingest_injuries    # Transfermarkt player and injury data
 python -m pipelines.compute_labels     # Workload features and injury risk labels
 ```
@@ -70,15 +101,15 @@ python -m pipelines.compute_labels     # Workload features and injury risk label
 
 ## Diagnosing problems
 
-Before clicking around the dashboard, check the health endpoint:
+Check the health endpoint before clicking around the dashboard:
 
 ```
 http://localhost:8000/api/health
 ```
 
-It reports DB connectivity, row counts for every table, which ML artifact files are loaded, and the most recent exception per API endpoint. The dashboard also has a built-in **Debug** page (click the 🔧 icon in the sidebar) that surfaces the same information without opening browser DevTools.
-
-Additional diagnostic endpoints:
+It reports DB connectivity, row counts for every table, which ML artifact files
+are loaded, and the most recent exception per API endpoint. The dashboard also
+has a built-in **Debug** page (🔧 icon in the sidebar).
 
 | Endpoint | What it shows |
 |---|---|
@@ -88,10 +119,12 @@ Additional diagnostic endpoints:
 
 **Common issues:**
 
-- `db_ok: false` — check `DB_DSN` in `config/settings.py` and confirm PostgreSQL is running.
+- `db_ok: false` — check `DB_DSN` in `.env` and confirm PostgreSQL is running.
 - Tables showing `0` rows — run the ingestion pipeline first (`python main.py`).
-- Artifacts showing `missing` — run training (`python main.py --train`). The dashboard falls back to DB queries and then demo data if artifacts are absent.
-- Pages loading but showing demo data — check the `source` field returned by each API endpoint. `"fallback"` means neither DB nor artifacts produced real data.
+- Artifacts showing `missing`, or `/api/models` returning `source: "empty"` —
+  run training (`python main.py --train`).
+- Pages loading but showing demo data — check the `source` field returned by
+  each API endpoint. `"fallback"` means neither DB nor artifacts produced real data.
 
 ---
 
@@ -99,20 +132,17 @@ Additional diagnostic endpoints:
 
 | Source | What it provides | How to get it |
 |---|---|---|
-| [StatsBomb Open Data](https://github.com/statsbomb/open-data) | Match events, lineups, player IDs | Clone the repo; point `DATA_ROOT` at the `data/` folder |
-| [Open-Meteo Archive API](https://open-meteo.com/en/docs/historical-weather-api) | Historical daily weather per stadium | Fetched automatically at runtime |
+| [StatsBomb Open Data](https://github.com/statsbomb/open-data) | Match events, lineups, player IDs, shots | Clone the repo; point `DATA_ROOT` at the `data/` folder |
 | [Transfermarkt injuries (Kaggle)](https://www.kaggle.com/datasets/irrazional/transfermarkt-injuries) | Injury records with dates | Download CSV |
 | [Transfermarkt players (Kaggle)](https://www.kaggle.com/datasets/davidcariboo/player-scores) | DOB, nationality, position, TM player IDs | Download `players.csv` |
 
 ### Competitions in scope
 
-| Competition | Seasons |
-|---|---|
-| La Liga | 2015/16 – 2020/21 |
-| UEFA Champions League | 2018/19 |
-| FIFA World Cup | 2018, 2022 |
-
-To change scope, edit the `COMPETITIONS` set in `config/settings.py`.
+The default scope is the complete **2015/16 season of all five major European
+leagues** (La Liga, Premier League, Serie A, Ligue 1, Bundesliga) plus the men's
+international tournaments **World Cup 2018 & 2022** and **Euro 2020 & 2024**
+(~2,025 matches across ~100 clubs and 50+ nations). To change scope, edit the
+`COMPETITIONS` set in `config/settings.py`.
 
 ---
 
@@ -120,61 +150,52 @@ To change scope, edit the `COMPETITIONS` set in `config/settings.py`.
 
 ```
 .
-├── config/
-│   └── settings.py                    # DB connection, file paths, competition scope
+├── config/settings.py                 # DB connection, file paths, competition scope
 ├── core/
 │   ├── caches.py                      # In-memory team and player caches (batch DB writes)
+│   ├── registry.py                    # Hybrid persistence: model_registry + prediction tables
 │   └── utils.py                       # norm_name() for accent-stripped name matching
-├── extract/
-│   └── statsbomb_local.py             # Read StatsBomb JSON files from disk
-├── load/
-│   └── postgres.py                    # DB write helpers (upsert_match, insert_stats, etc.)
+├── extract/statsbomb_local.py         # Read StatsBomb JSON files from disk
 ├── transform/
 │   ├── features.py                    # Vectorised per-player stat aggregation, xa extraction
 │   └── schema.py                      # StatsBomb nested-dict field accessors
 ├── pipelines/
 │   ├── ingest_statsbomb.py            # Parallel match ingestion (ProcessPoolExecutor)
-│   ├── ingest_weather.py              # Concurrent weather fetch (ThreadPoolExecutor + retry)
-│   ├── ingest_injuries.py             # Transfermarkt player and injury matching
-│   ├── compute_labels.py              # Workload features and injury risk labels
+│   ├── extract_shots.py               # Shot events + freeze-frame features for xG
+│   ├── ingest_injuries.py            # Transfermarkt player and injury matching
+│   ├── compute_labels.py             # Workload features and injury risk labels
 │   └── ingest_pass_network.py         # Backfill tool for pass edges only
 ├── models/
-│   ├── model1_player_clustering.py    # KMeans / DBSCAN / GMM player archetypes
-│   ├── model2_team_cohesion.py        # Pass-network graph metrics + regression
-│   ├── model3_injury_risk.py          # XGBoost / RF binary classifier
-│   ├── model4_environment.py          # Weather + venue regression (GBR)
-│   └── model5_win_probability.py      # Win / draw / loss multiclass classifier
-├── utils/
-│   ├── aggregate.py                   # Match-level and batch aggregation utilities
-│   ├── validate_data.py               # StatsBomb event validation helpers
-│   └── validate_schema.py             # Live DB schema vs expected DDL checker
+│   ├── model1_player_clustering.py    # KMeans (spatial) + GMM (style) archetypes
+│   ├── model2_team_cohesion.py        # Pass-network graph metrics + GBR/Ridge regression
+│   ├── model3_injury_risk.py          # XGBoost / RF / LR binary classifier
+│   ├── model5_win_probability.py      # Win/draw/loss classifier (pre-match + in-game)
+│   ├── model_xg.py                    # From-scratch xG (HistGradientBoostingClassifier)
+│   └── eval_utils.py                  # Leakage-safe CV (GroupKFold, held-out season)
 ├── front-end/
 │   ├── index.html                     # App shell (sidebar, topbar, page containers)
-│   ├── css/
-│   │   ├── variables.css              # Design tokens: colors, fonts, spacing
-│   │   ├── reset.css                  # Browser resets, utility classes, animations
-│   │   ├── layout.css                 # Sidebar, topbar, content area, grid helpers
-│   │   ├── components.css             # Cards, badges, tables, progress bars, tooltips
-│   │   └── pages.css                  # Page-specific styles (dashboard, player, etc.)
+│   ├── css/                           # variables → reset → layout → components → pages
 │   ├── js/
-│   │   ├── charts.js                  # Chart.js wrappers for all five chart types
+│   │   ├── charts.js                  # Chart.js wrappers (incl. EDA + xG-benchmark charts)
 │   │   ├── passNetwork.js             # SVG force-directed pass network graph
 │   │   ├── navigation.js              # Page switching with onNavigate callback hook
 │   │   ├── api.js                     # Fetch wrappers for all API endpoints
 │   │   ├── main.js                    # Bootstrap, render functions, error display
 │   │   └── pageLoader.js              # Async HTML injection with script re-execution
 │   └── pages/
-│       ├── dashboard.html             # KPI grid, performance trend, squad status
-│       ├── player.html                # Player profile, radar chart, cluster grid
+│       ├── dashboard.html             # KPIs, performance trend, recent results, league xG
+│       ├── player.html                # Player profile, radar chart, style clusters
+│       ├── xg.html                    # Shot map, goals-vs-xG, finishing leaderboard
 │       ├── cohesion.html              # Pass network visualization, centrality cards
-│       ├── injury.html                # Risk table, SHAP factors, injury history chart
-│       ├── env.html                   # Temperature scatter, weather condition summary
-│       ├── winprob.html               # Probability banner, timeline chart
+│       ├── injury.html                # Risk table, factors, injury risk chart
+│       ├── winprob.html               # Probability banner, timelines, model accuracy
+│       ├── eda.html                   # Exploratory data analysis (distributions, coverage)
+│       ├── models.html                # Model cards: methodology, metrics, diagnostic figures
 │       └── debug.html                 # System diagnostics (DB, artifacts, console log)
 ├── api_server.py                      # FastAPI backend — all dashboard API endpoints
 ├── schema.sql                         # Full DDL (run via init_db.py)
 ├── init_db.py                         # One-time schema creation and verification
-├── main.py                            # Pipeline orchestrator
+├── main.py                            # Pipeline orchestrator (+ registry persistence)
 └── requirements.txt
 ```
 
@@ -190,77 +211,46 @@ ID naming convention used throughout:
 | `sb_*_id` | StatsBomb source identifier |
 | `tm_*_id` | Transfermarkt source identifier |
 
-### Tables
+### Core tables
 
-**`teams`** — one row per team  
-**`players`** — one row per player; `sb_player_id` and `tm_player_id` are nullable and filled in as data is matched  
-**`stadiums`** — one row per stadium; latitude/longitude backfilled by the weather pipeline  
-**`matches`** — one row per match; references `teams` for home/away and `stadiums` for coordinates  
-**`weather`** — one row per match; joined on `match_id`  
-**`injuries`** — one row per injury record from Transfermarkt  
-**`player_match_stats`** — one row per player × match; the central fact table used by all models  
-**`player_match_features`** — one row per player × match; computed ML columns (workload, injury label) kept separate from raw stats  
-**`pass_network_edges`** — aggregated passer → receiver counts per match and team  
-**`match_minute_snapshots`** — cumulative in-game stats per team per minute; used by the Model 5 in-game sub-model  
+**`teams`**, **`players`**, **`stadiums`**, **`matches`** — reference/dimension tables
+**`injuries`** — one row per injury record from Transfermarkt
+**`player_match_stats`** — one row per player × match; the central fact table used by all models
+**`player_match_features`** — computed ML columns (workload, injury label) kept separate from raw stats
+**`pass_network_edges`** — aggregated passer → receiver counts per match and team
+**`match_minute_snapshots`** — cumulative in-game stats per team per minute (Model 5 in-game sub-model)
+**`shots`** — one row per shot event with geometry, context, and freeze-frame features (xG model + shot maps)
 
----
+### Model-persistence tables
 
-## Pipeline Stages
-
-### Stage 1 — StatsBomb ingestion (`ingest_statsbomb.py`)
-
-Reads every in-scope match JSON in parallel using `ProcessPoolExecutor`. Workers compute all player stats, pass network edges, starting positions, and minute-by-minute snapshots from raw events. The main process batches DB writes, committing every 50 matches per competition.
-
-Produces rows in: `teams`, `players`, `stadiums`, `matches`, `player_match_stats`, `pass_network_edges`, `match_minute_snapshots`
-
-### Stage 2 — Weather ingestion (`ingest_weather.py`)
-
-Fetches one Open-Meteo API call per match using `ThreadPoolExecutor`. Retries up to 4 times with exponential backoff on rate limits (HTTP 429) or transient errors. Derives a `weather_condition` label (`clear`, `rain`, `heavy_rain`, `windy`, `cold`, `hot`) from numeric fields. Backfills stadium coordinates into the `stadiums` table and `weather_id` into `player_match_stats`.
-
-Produces rows in: `weather`; updates `player_match_stats.weather_id`, `stadiums.stadium_lat/lng`
-
-### Stage 3 — Injuries ingestion (`ingest_injuries.py`)
-
-Two-pass process:
-
-**Pass 1** matches Transfermarkt players to StatsBomb players and backfills `tm_player_id`, `date_of_birth`, `nationality`, and `position` onto the `players` table. Matching priority:
-
-1. TM ID already linked in DB (reruns)
-2. Exact `norm_name` match (accent-stripped, lowercase)
-3. Token-subset match (handles middle names)
-4. Blocking + RapidFuzz fuzzy match (handles transliteration variants)
-
-**Pass 2** inserts injury rows using the `tm_player_id → player_id` map built in Pass 1.
-
-Produces rows in: `injuries`; updates `players`
-
-### Stage 4 — Compute labels (`compute_labels.py`)
-
-Three SQL `UPDATE` passes over `player_match_features`:
-
-1. **`matches_last_30_days` / `minutes_last_30_days`** — counts prior matches and minutes in the 30-day window before each match date, per player
-2. **`days_since_last_injury`** — days since the player's most recent `return_date` before each match
-3. **`is_injured_next_30d`** — set to `TRUE` where an injury record falls within 30 days after the match date (Model 3 target label)
+**`model_registry`** — one row per trained model (metadata + metrics, see above)
+**Prediction tables** — `model1_player_clusters`, `xg_shot_predictions`,
+`model2_graph_features`, `model3_features`, `model5_features_pre`; created
+dynamically at training time from each model's derived DataFrame.
 
 ---
 
 ## ML Models
 
-| # | Model | Type | Target |
-|---|---|---|---|
-| 1 | Player Efficiency and Style Profiling | Clustering (KMeans / DBSCAN / GMM) | Player tactical archetype |
-| 2 | Team Cohesion Analysis | Graph metrics + GBR regression | Goals scored |
-| 3 | Injury Risk Prediction | Binary classification (XGBoost / RF / LR) | `is_injured_next_30d` |
-| 4 | Environmental Impact Analysis | GBR regression (per target) | xG, pass accuracy, pressures |
-| 5 | Win Probability Modeling | Multiclass classification (GBC / RF / LR) | Win / draw / loss |
+| Key | Model | Type | Target | Headline metric |
+|---|---|---|---|---|
+| `model1_player_clustering` | Player Efficiency & Style Profiling | Clustering (KMeans + GMM) | Player archetype (dual-axis) | Spatial silhouette ≈ 0.29 |
+| `model2_team_cohesion` | Team Cohesion (Pass Networks) | Graph metrics + GBR/Ridge | Goals scored | GBR R² ≈ 0.10 (grouped CV) |
+| `model3_injury_risk` | Injury Risk Prediction | Classification (XGBoost / RF / LR) | `is_injured_next_30d` | ROC-AUC ≈ 0.77 |
+| `model5_win_probability` | Win Probability | Classification (GBC, pre-match + in-game) | Win / draw / loss | In-game accuracy ≈ 0.64 |
+| `model_xg` | Expected Goals (from scratch) | Classification (HistGradientBoosting) | `is_goal` per shot | ROC-AUC ≈ 0.82 (vs StatsBomb 0.81) |
 
-Trained artifacts are saved to `artifacts/model{N}/` as `.pkl` and `.parquet` files.
+All models are evaluated with leakage-safe cross-validation (GroupKFold /
+StratifiedGroupKFold by match) plus a held-out 2022 season. Trained artifacts are
+saved to `artifacts/model{N}/` and registered in `model_registry` (see above).
 
 ---
 
 ## Dashboard
 
-The FastAPI server (`api_server.py`) exposes a browser dashboard at `http://localhost:8000`. Each page corresponds to one ML model.
+The FastAPI server (`api_server.py`) serves a browser dashboard at
+`http://localhost:8000`. Each analytics page corresponds to one ML model; the
+**EDA** and **Models** pages give a whole-dataset and methodology view.
 
 ### Data source priority
 
@@ -271,51 +261,90 @@ Every endpoint tries sources in this order and falls back automatically:
 3. **Artifact only** — parquet features file used directly when the DB is unreachable
 4. **Demo fallback** — hardcoded plausible data so the UI is never blank
 
-The data source badge in the topbar and the `source` field in every API response indicate which path was taken.
+The data source badge in the topbar and the `source` field in every API response
+indicate which path was taken.
 
 ### API endpoints
 
 | Endpoint | Description |
 |---|---|
 | `GET /api/options/teams` | List of teams for the selector dropdown |
-| `GET /api/dashboard?team_id=N` | KPI summary and performance trend |
-| `GET /api/player-efficiency?team_id=N` | Player stats, archetypes, radar chart data |
-| `GET /api/team-cohesion?team_id=N` | Pass network edges and graph metrics |
-| `GET /api/injury-risk?team_id=N` | Per-player injury risk scores |
-| `GET /api/environment-impact?team_id=N` | Weather vs performance correlation |
-| `GET /api/win-probability?team_id=N` | Pre-match and in-game win probability |
+| `GET /api/options/seasons?team_id=N` | Seasons a team appears in (drives the season selector) |
+| `GET /api/player-efficiency?team_id=N&season=S` | Player stats, archetypes, radar chart data |
+| `GET /api/team-cohesion?team_id=N&season=S` | Pass network edges and graph metrics |
+| `GET /api/xg-finishing?team_id=N&season=S` | Goals vs xG per player, finishing leaderboard |
+| `GET /api/shot-map?team_id=N&season=S` | Shot positions and xG for the pitch map |
+| `GET /api/league-xg?season=S` | Season table: goals vs xG, points vs expected points |
+| `GET /api/matches?team_id=N&season=S` | Matches for a team (optionally one season) |
+| `GET /api/match-xg-timeline?match_id=N` | Cumulative xG race for both teams in a match |
+| `GET /api/injury-risk?team_id=N&season=S` | Per-player injury risk scores |
+| `GET /api/win-probability?team_id=N&season=S` | Model's average pre-match win/draw/loss + actual record |
+| `GET /api/eda` | Exploratory data analysis aggregations over the source tables |
+| `GET /api/models` | Model registry: algorithm, features, metrics, diagnostic figures |
 | `GET /api/health` | DB status, table counts, artifact state, last errors |
 | `GET /api/debug/artifacts` | Detailed type and shape of every loaded artifact |
 | `GET /api/debug/db` | PostgreSQL and psycopg2 version |
+| `GET /artifacts/...` | Static mount serving trained-model diagnostic figures (PNGs) |
+
+The `season=S` parameter is optional on every team-scoped endpoint — omit it (or pass
+`season=all`) for all matches, or pass a value from `/api/options/seasons` (e.g.
+`2015/2016`, `2024`) to filter the whole dashboard to one season. The topbar season
+selector is populated per team and defaults to that team's most-played season.
 
 ### Frontend architecture
 
-The frontend is a vanilla JS single-page application with no build step required.
+A vanilla JS single-page application with no build step.
 
-- **`pageLoader.js`** fetches each page's HTML template and injects it into the shell. It re-executes `<script>` tags after injection (browsers do not run scripts added via `innerHTML` — this is a spec requirement that the loader works around by cloning and re-appending each script element).
-- **`navigation.js`** switches visible pages and fires an `onNavigate` callback so `main.js` can lazy-render pages on first visit, avoiding Chart.js sizing bugs on off-screen canvases.
-- **`main.js`** awaits `pagesLoadedPromise` before initialising navigation or fetching data, eliminating a race condition where users could click nav items before page HTML existed in the DOM.
-- All chart initialisations are wrapped in `requestAnimationFrame` so Canvas elements are measured at their rendered dimensions.
-- API errors are surfaced as visible red banners in the UI rather than silently swallowed.
+- **`pageLoader.js`** fetches each page's HTML template and injects it into the
+  shell, re-executing `<script>` tags after injection (browsers do not run
+  scripts added via `innerHTML`).
+- **`navigation.js`** switches visible pages and fires an `onNavigate` callback
+  so `main.js` can lazy-render pages on first visit (avoids Chart.js sizing bugs
+  on off-screen canvases).
+- **`main.js`** awaits `pagesLoadedPromise` before initialising. Team-dependent
+  pages refresh on team change via `Promise.allSettled` (failures are isolated);
+  the team-independent **EDA** and **Models** data is fetched once on bootstrap.
+- API errors are surfaced as visible red banners rather than silently swallowed.
+
+To add a new page, mirror the existing pattern across `index.html` (nav item +
+container), `pageLoader.js` (`PAGES`), `navigation.js` (`PAGE_TITLES`), `api.js`
+(fetch wrapper), `main.js` (render function), and a new `pages/<name>.html`.
 
 ### Design system
 
-The dashboard uses a "Precision Analytics" theme — dark industrial palette with a technical/data-forward aesthetic.
+A "Precision Analytics" theme — dark industrial palette, data-forward aesthetic.
 
-| Role | Font | Rationale |
-|---|---|---|
-| Headings, page title | Syne | Geometric, distinctive, reads as a data product |
-| KPI values, numbers, labels | IBM Plex Mono | Monospaced digits don't shift width as values change |
-| Body, UI copy | DM Sans | Clean, readable at small sizes |
+| Role | Font |
+|---|---|
+| Headings, page title | Syne |
+| KPI values, numbers, labels | IBM Plex Mono |
+| Body, UI copy | DM Sans |
 
-CSS is split across five files loaded in dependency order: `variables.css` → `reset.css` → `layout.css` → `components.css` → `pages.css`. All colors, spacing, and typography are defined as CSS custom properties in `variables.css`. No preprocessor or build tool is needed.
+CSS is split across five files loaded in dependency order: `variables.css` →
+`reset.css` → `layout.css` → `components.css` → `pages.css`. All colors,
+spacing, and typography are defined as CSS custom properties in `variables.css`.
 
 ---
 
 ## Notes
 
-- Run `init_db.py` again if you change `schema.sql`. It uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` so it is safe to re-run, but column renames require manual `ALTER TABLE` migrations. Use `utils/validate_schema.py` to check whether the live DB matches the expected DDL.
-- `ingest_pass_network.py` is a backfill-only tool. Pass edges are extracted during Stage 1 as part of the same event read. Only run this script if you need to populate edges for matches ingested before this was added.
-- Weather is fetched for all matches that have no weather row. Re-running `ingest_weather.py` is safe and only fetches what is missing.
-- `rapidfuzz` is required for fuzzy name matching in Stage 3. Without it, matching falls back to exact and token-subset only, which reduces injury linkage significantly.
-- The `player_match_features` table must be populated by `compute_labels.py` before training Model 3 or using the injury risk endpoint with real data. If it is empty, the API falls back to a simpler heuristic score derived from `minutes_played` alone.
+- Re-run `init_db.py` after changing `schema.sql`. It uses `CREATE TABLE IF NOT
+  EXISTS` so it is safe to re-run; column renames need manual `ALTER TABLE`.
+  Use `utils/validate_schema.py` to check the live DB against the expected DDL.
+- The model **prediction tables** are dropped and recreated on every
+  `main.py --train` run by `core/registry.replace_table()`; the `model_registry`
+  row is upserted, keeping one row per `(model_key, version)`.
+- `ingest_pass_network.py` is a backfill-only tool — pass edges are normally
+  extracted during StatsBomb ingestion.
+- The `player_match_features` table must be populated by `compute_labels.py`
+  before training Model 3. If empty, the injury endpoint falls back to a simpler
+  heuristic derived from `minutes_played`.
+- Only `artifacts/model1/model1_kmeans_spatial.pkl` / `model1_scaler_spatial.pkl`
+  / `model1_gmm_style.pkl` / `model1_scaler.pkl` and the parquet/figure outputs
+  are produced by the current (v4.0) `model1_player_clustering.py` and read by
+  `api_server.py`. `/api/player-efficiency` serves archetypes from the
+  precomputed `final_player_archetype` column in `player_clusters.parquet`
+  (joined by `player_id`) rather than re-predicting live — the spatial and
+  style axes each need their own feature vector and scaler, so a faithful live
+  re-prediction isn't worth duplicating here. Players missing from that table
+  are labelled `"Unclassified"`.

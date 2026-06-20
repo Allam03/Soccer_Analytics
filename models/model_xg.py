@@ -116,26 +116,27 @@ def run(conn, output_dir: str = "artifacts/model_xg") -> Dict[str, Any]:
                             method="predict_proba")[:, 1]
 
     logger.info("Out-of-fold evaluation (GroupKFold by match):")
-    _report("xG model (ours)", y, oof)
+    m_ours = _report("xG model (ours)", y, oof)
 
     # Benchmark: StatsBomb's professional xG on the same shots.
     sb = df["statsbomb_xg"].astype(float)
     mask = sb.notna().values
-    _report("StatsBomb xG (bench)", y[mask], sb.values[mask])
+    m_sb = _report("StatsBomb xG (bench)", y[mask], sb.values[mask])
 
     # Naive baseline: constant league goal rate.
-    _report("naive (mean rate)", y, np.full_like(y, y.mean(), dtype=float))
+    m_naive = _report("naive (mean rate)", y, np.full_like(y, y.mean(), dtype=float))
 
     corr = np.corrcoef(oof[mask], sb.values[mask])[0, 1]
     logger.info("Correlation(our xG, StatsBomb xG) = %.3f", corr)
 
     # Held-out season (out-of-distribution generalisation).
+    m_ho = None
     test = (df["season"] == "2022").values
     if test.sum() and (~test).sum():
         pipe = build_pipeline().fit(X[~test], y[~test])
         p_test = pipe.predict_proba(X[test])[:, 1]
         logger.info("Held-out WC-2022 (n=%d):", test.sum())
-        _report("xG model held-out", y[test], p_test)
+        m_ho = _report("xG model held-out", y[test], p_test)
 
     # Calibration by decile of predicted xG.
     logger.info("Calibration (decile of predicted xG -> actual goal rate):")
@@ -148,12 +149,44 @@ def run(conn, output_dir: str = "artifacts/model_xg") -> Dict[str, Any]:
     final = build_pipeline().fit(X, y)
     joblib.dump(final, f"{output_dir}/xg_model.pkl")
     df["xg_pred"] = final.predict_proba(X)[:, 1]
-    df[["shot_id", "match_id", "player_id", "team_id", "distance", "angle",
-        "statsbomb_xg", "xg_pred", "is_goal"]].to_parquet(
-        f"{output_dir}/shots_xg.parquet", index=False)
+    pred_cols = ["shot_id", "match_id", "player_id", "team_id", "distance",
+                 "angle", "statsbomb_xg", "xg_pred", "is_goal"]
+    pred_df = df[pred_cols].copy()
+    pred_df.to_parquet(f"{output_dir}/shots_xg.parquet", index=False)
     logger.info("xG artifacts saved to %s", output_dir)
 
-    return {"model": final, "df": df}
+    metrics = {
+        "roc_auc": m_ours["auc"],
+        "log_loss": m_ours["log_loss"],
+        "brier": m_ours["brier"],
+        "statsbomb_roc_auc": m_sb["auc"],
+        "statsbomb_log_loss": m_sb["log_loss"],
+        "naive_log_loss": m_naive["log_loss"],
+        "corr_with_statsbomb": float(corr),
+        "goal_rate": float(y.mean()),
+    }
+    if m_ho is not None:
+        metrics["heldout_2022_roc_auc"] = m_ho["auc"]
+        metrics["heldout_2022_log_loss"] = m_ho["log_loss"]
+
+    return {
+        "model": final,
+        "df": df,
+        "_registry": {
+            "model_key": "model_xg",
+            "version": "1.0",
+            "display_name": "Expected Goals (xG)",
+            "task": "classification",
+            "algorithm": "HistGradientBoostingClassifier (calibrated pipeline)",
+            "target": "is_goal (P(goal | shot context))",
+            "features": list(FEATURES),
+            "metrics": metrics,
+            "n_train_rows": int(len(df)),
+            "artifact_path": output_dir,
+            "prediction_table": "xg_shot_predictions",
+        },
+        "_predictions": {"xg_shot_predictions": pred_df},
+    }
 
 
 if __name__ == "__main__":

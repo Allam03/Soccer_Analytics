@@ -142,6 +142,19 @@
   flex-shrink: 0;
 }
 
+.nav-icon svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  margin: 0 auto;
+}
+
+.logo-icon svg {
+  width: 19px;
+  height: 19px;
+  color: var(--accent);
+}
+
 /* Debug nav item — visually separated at the bottom */
 .nav-item.nav-debug {
   margin-top: auto;

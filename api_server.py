@@ -1,26 +1,17 @@
 """
-api_server.py  — v2.4.0
+api_server.py  — v2.5.0
 
-Changes vs v2.3.0
+FastAPI backend for the soccer-analytics dashboard.
+
+Key design points
 -----------------
-BUG FIXES
-- injury_risk(): removed the duplicate `seen` declaration. A single
-  `seen: set[str]` is now declared once before the branching logic and
-  shared by both the model path and the heuristic path.
-
-PERFORMANCE
-- _query() now uses a SimpleConnectionPool (min 1, max 10) instead of
-  opening and closing a fresh psycopg2 connection on every request.
-  Removes ~20-50ms overhead per API call and prevents connection exhaustion
-  under concurrent load.
-
-FRONTEND RACE CONDITION
-- /api/dashboard no longer calls renderSquadStatusCards eagerly. Squad
-  status cards are now rendered from main.js only after both dashboard
-  AND injury data have resolved, preventing the silent empty-grid bug
-  where AppState.injury was null when renderDashboard ran first.
-  The API itself is unchanged; the fix is in main.js. This comment
-  documents the coordinated change.
+- _query() uses a SimpleConnectionPool (min 1, max 10) rather than opening a
+  fresh psycopg2 connection per request.
+- Every team-scoped endpoint accepts an optional `season` query param and
+  filters to a single season (see _season_filter / _season_match_ids). The
+  frontend drives this via the per-team season selector and /api/options/seasons.
+- Each endpoint reports a `source` field (database / artifact / fallback) so the
+  UI can show where its data came from.
 """
 
 from __future__ import annotations
@@ -117,10 +108,19 @@ def _parquet(path) -> pd.DataFrame | None:
 
 def _load_all_artifacts() -> None:
     a = ARTIFACT_DIR
+    # model1_player_clustering.py (v4.0) is dual-axis: a spatial KMeans (fit on
+    # avg_x_start/avg_y_start) and a style GaussianMixture (fit on per-90 rate
+    # features), each with its own scaler. There is no single "kmeans.pkl" /
+    # "scaler.pkl" pair any more — those names belonged to a pre-v4.0 version
+    # of the script. Loaded here under their real names for debug visibility
+    # only; live serving uses the precomputed final_player_archetype column in
+    # the parquet below (see player_efficiency()), not a live re-prediction.
     _A["m1"] = {
-        "kmeans": _load(a / "model1" / "kmeans.pkl"),
-        "scaler": _load(a / "model1" / "scaler.pkl"),
-        "df":     _parquet(a / "model1" / "player_clusters.parquet"),
+        "kmeans_spatial": _load(a / "model1" / "model1_kmeans_spatial.pkl"),
+        "scaler_spatial": _load(a / "model1" / "model1_scaler_spatial.pkl"),
+        "gmm_style":      _load(a / "model1" / "model1_gmm_style.pkl"),
+        "scaler_style":   _load(a / "model1" / "model1_scaler.pkl"),
+        "df":             _parquet(a / "model1" / "player_clusters.parquet"),
     }
     _A["m2"] = {
         "gbr":     _load(a / "model2" / "gbr.pkl"),
@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
-app = FastAPI(title="Soccer Analytics API", version="2.4.0", lifespan=lifespan)
+app = FastAPI(title="Soccer Analytics API", version="2.5.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -181,6 +181,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+# Serve trained-model diagnostic figures (PCA scatter, silhouette bars, radar
+# profiles, feature heatmaps, calibration, ...) straight from the artifacts dir
+# so the Models & Methodology page can embed them with <img src="/artifacts/...">.
+if ARTIFACT_DIR.exists():
+    app.mount("/artifacts", StaticFiles(directory=ARTIFACT_DIR), name="artifacts")
 
 
 # =============================================================================
@@ -253,6 +259,32 @@ def _validate_team_id(team_id: int) -> None:
         )
 
 
+def _has_season(season: str | None) -> bool:
+    """True when a concrete season filter should be applied (not 'all'/blank)."""
+    return bool(season) and season.lower() != "all"
+
+
+def _season_filter(season: str | None, alias: str = "m") -> tuple[str, list]:
+    """SQL fragment + params constraining a query (already joined to a `matches`
+    alias) to one season. Returns ('', []) when no season filter is requested."""
+    if _has_season(season):
+        return f" AND {alias}.season = %s", [season]
+    return "", []
+
+
+def _season_match_ids(season: str | None) -> set[int] | None:
+    """Set of match_ids in a season (for filtering artifact DataFrames by
+    match_id). None means 'no season filter'."""
+    if not _has_season(season):
+        return None
+    try:
+        rows = _query("SELECT match_id FROM matches WHERE season = %s", (season,))
+        return {int(r["match_id"]) for r in rows}
+    except Exception as exc:
+        logger.warning("_season_match_ids(%s) error: %s", season, exc)
+        return None
+
+
 # =============================================================================
 # Static routes
 # =============================================================================
@@ -284,7 +316,7 @@ def health() -> dict[str, Any]:
     table_counts: dict[str, Any] = {}
     if db_reachable:
         for tbl in (
-            "teams", "players", "matches", "stadiums",
+            "teams", "players", "matches", "stadiums", "weather",
             "player_match_stats", "shots", "injuries", "player_match_features",
             "pass_network_edges", "match_minute_snapshots",
         ):
@@ -358,6 +390,173 @@ def debug_db() -> dict[str, Any]:
 
 
 # =============================================================================
+# /api/models  — model registry (powers the Models & Methodology page)
+# =============================================================================
+
+def _model_figures(artifact_path: str | None) -> list[str]:
+    """Return URLs for the diagnostic PNGs of a model, served via /artifacts.
+
+    The registry stores artifact_path like "artifacts/model1"; the on-disk
+    folder name (its last component) is also the /artifacts URL segment."""
+    if not artifact_path:
+        return []
+    name = Path(artifact_path).name           # e.g. "model1", "model_xg"
+    d = ARTIFACT_DIR / name
+    if not d.exists():
+        return []
+    return sorted(f"/artifacts/{name}/{p.name}" for p in d.glob("*.png"))
+
+
+@app.get("/api/models")
+def models() -> dict[str, Any]:
+    try:
+        rows = _query(
+            """
+            SELECT model_key, version, display_name, task, algorithm, target,
+                   features, metrics, n_train_rows, sklearn_version,
+                   artifact_path, prediction_table, trained_at
+            FROM model_registry
+            ORDER BY model_key
+            """
+        )
+        if rows:
+            for r in rows:
+                if r.get("trained_at") is not None:
+                    r["trained_at"] = str(r["trained_at"])
+                r["figures"] = _model_figures(r.get("artifact_path"))
+            logger.info("/api/models: %d models from registry", len(rows))
+            return {"models": rows, "source": "database"}
+        logger.warning("/api/models: registry empty")
+        return {
+            "models": [],
+            "source": "empty",
+            "note": "model_registry is empty — run `python main.py --train` "
+                    "to train models and populate the registry.",
+        }
+    except Exception as exc:
+        logger.warning("/api/models DB error: %s", exc)
+        _last_errors["models"] = str(exc)
+        return {"models": [], "source": "fallback", "error": str(exc)}
+
+
+# =============================================================================
+# /api/eda  — exploratory data analysis over the source tables
+# =============================================================================
+
+def _safe_rows(sql: str, params: tuple = ()) -> list[dict]:
+    """Run a query and return [] on any error (EDA panels degrade independently)."""
+    try:
+        return _query(sql, params)
+    except Exception as exc:
+        logger.warning("/api/eda query failed: %s", exc)
+        return []
+
+
+@app.get("/api/eda")
+def eda() -> dict[str, Any]:
+    if not _db_ok():
+        return {"source": "fallback", "error": "DB unreachable", "overview": {}}
+
+    overview = {
+        tbl: _table_count(tbl)
+        for tbl in (
+            "teams", "players", "matches", "shots",
+            "injuries", "player_match_stats", "pass_network_edges",
+        )
+    }
+
+    # Matches per competition + season (dataset scope/coverage).
+    coverage = _safe_rows(
+        """
+        SELECT competition, season, COUNT(*) AS matches
+        FROM matches
+        WHERE competition IS NOT NULL
+        GROUP BY competition, season
+        ORDER BY competition, season
+        """
+    )
+
+    # Players per nominal position.
+    positions = _safe_rows(
+        """
+        SELECT COALESCE(NULLIF(TRIM(position), ''), 'Unknown') AS position,
+               COUNT(*) AS n
+        FROM players
+        GROUP BY 1
+        ORDER BY n DESC
+        LIMIT 15
+        """
+    )
+
+    # Shot distance distribution (metres to goal, 16 buckets over 0–40 m).
+    shot_distance = _safe_rows(
+        """
+        SELECT width_bucket(distance, 0, 40, 16) AS bucket, COUNT(*) AS n
+        FROM shots
+        WHERE distance IS NOT NULL
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    )
+
+    # StatsBomb xG distribution (10 buckets over 0–1).
+    xg_distribution = _safe_rows(
+        """
+        SELECT width_bucket(statsbomb_xg, 0, 1, 10) AS bucket, COUNT(*) AS n
+        FROM shots
+        WHERE statsbomb_xg IS NOT NULL
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    )
+
+    # Goals per match distribution.
+    goals_per_match = _safe_rows(
+        """
+        SELECT (home_score + away_score) AS total_goals, COUNT(*) AS n
+        FROM matches
+        WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+        GROUP BY total_goals
+        ORDER BY total_goals
+        """
+    )
+
+    # Shot conversion by body part (data-quality + finishing insight).
+    conversion_by_bodypart = _safe_rows(
+        """
+        SELECT COALESCE(body_part, 'Unknown') AS body_part,
+               COUNT(*) AS shots,
+               SUM(CASE WHEN is_goal THEN 1 ELSE 0 END) AS goals,
+               ROUND(AVG(CASE WHEN is_goal THEN 1.0 ELSE 0.0 END)::numeric, 3) AS conversion
+        FROM shots
+        GROUP BY 1
+        ORDER BY shots DESC
+        """
+    )
+
+    # Injury label balance (for the injury model).
+    injury_balance = _safe_rows(
+        """
+        SELECT is_injured_next_30d AS injured, COUNT(*) AS n
+        FROM player_match_features
+        GROUP BY 1
+        """
+    )
+
+    return {
+        "source": "database",
+        "overview": overview,
+        "coverage": coverage,
+        "positions": positions,
+        "shot_distance": shot_distance,
+        "xg_distribution": xg_distribution,
+        "goals_per_match": goals_per_match,
+        "conversion_by_bodypart": conversion_by_bodypart,
+        "injury_balance": injury_balance,
+    }
+
+
+# =============================================================================
 # /api/options/teams
 # =============================================================================
 
@@ -396,90 +595,39 @@ def teams() -> dict[str, Any]:
 
 
 # =============================================================================
-# /api/dashboard
+# /api/options/seasons — seasons a given team appears in (drives the season
+# selector). Ordered most-played-first so the frontend can default to the
+# team's primary season.
 # =============================================================================
 
-@app.get("/api/dashboard")
-def dashboard(team_id: int) -> dict[str, Any]:
+@app.get("/api/options/seasons")
+def seasons(team_id: int) -> dict[str, Any]:
     _validate_team_id(team_id)
-
     try:
-        recent = _query(
+        rows = _query(
             """
-            SELECT m.match_date,
-                   AVG((pms.xg * 20) + (pms.pass_accuracy * 0.5) + (pms.key_passes * 2)) AS perf
-            FROM player_match_stats pms
-            JOIN matches m ON m.match_id = pms.match_id
-            WHERE pms.team_id = %s
-            GROUP BY m.match_date
-            ORDER BY m.match_date DESC
-            LIMIT 10
+            SELECT m.season, COUNT(*) AS matches
+            FROM matches m
+            WHERE (m.home_team_id = %s OR m.away_team_id = %s)
+              AND m.season IS NOT NULL
+            GROUP BY m.season
+            ORDER BY COUNT(*) DESC, m.season DESC
             """,
-            (team_id,),
+            (team_id, team_id),
         )
-        kpi_rows = _query(
-            """
-            SELECT
-              AVG((pms.xg * 20) + (pms.pass_accuracy * 0.5) + (pms.key_passes * 2))
-                  AS team_performance,
-              AVG(pms.pass_accuracy) / 100.0 AS cohesion_index
-            FROM player_match_stats pms
-            WHERE pms.team_id = %s
-            """,
-            (team_id,),
-        )
-        db_available = bool(recent and kpi_rows)
-        if db_available:
-            logger.info("/api/dashboard team=%d: %d recent matches from DB", team_id, len(recent))
-    except Exception as exc:
-        logger.warning("/api/dashboard team=%d DB error: %s", team_id, exc)
-        _last_errors["dashboard"] = str(exc)
-        recent = []
-        kpi_rows = []
-        db_available = False
-
-    finishing = _xg_team_diff(team_id)   # team goals - xG (None if no xG data)
-    win_pct   = _m5_win_pct_direct(team_id)
-
-    if db_available:
-        recent = list(reversed(recent))
-        kpi = kpi_rows[0]
-        return {
-            "kpi": {
-                "team_performance":   round(float(kpi["team_performance"] or 0), 1),
-                "cohesion_index":     round(float(kpi["cohesion_index"] or 0), 2),
-                "finishing_diff":     finishing if finishing is not None else 0.0,
-                "next_match_win_pct": win_pct,
-            },
-            "performance_trend": {
-                "labels": [
-                    r["match_date"].isoformat()
-                    if hasattr(r["match_date"], "isoformat")
-                    else str(r["match_date"])
-                    for r in recent
+        if rows:
+            return {
+                "seasons": [
+                    {"season": r["season"], "matches": int(r["matches"])}
+                    for r in rows
                 ],
-                "values": [round(float(r["perf"] or 0), 1) for r in recent],
-            },
-            "source": "database+artifact",
-        }
+                "source": "database",
+            }
+    except Exception as exc:
+        logger.warning("/api/options/seasons team=%d DB error: %s", team_id, exc)
+        _last_errors["seasons"] = str(exc)
 
-    offset = team_id % 4
-    values = [79 + offset, 82 + offset, 81 + offset, 85 + offset,
-              84 + offset, 86 + offset, 87 + offset, 89 + offset,
-              88 + offset, 90 + offset]
-    return {
-        "kpi": {
-            "team_performance":   round(sum(values) / len(values), 1),
-            "cohesion_index":     0.78 + (offset * 0.01),
-            "finishing_diff":     finishing if finishing is not None else 0.0,
-            "next_match_win_pct": win_pct,
-        },
-        "performance_trend": {
-            "labels": [str(i) for i in range(1, 11)],
-            "values": values,
-        },
-        "source": "fallback+artifact",
-    }
+    return {"seasons": [{"season": "2015/2016", "matches": 0}], "source": "fallback"}
 
 
 # =============================================================================
@@ -487,27 +635,29 @@ def dashboard(team_id: int) -> dict[str, Any]:
 # =============================================================================
 
 @app.get("/api/player-efficiency")
-def player_efficiency(team_id: int) -> dict[str, Any]:
+def player_efficiency(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
 
-    kmeans     = _A.get("m1", {}).get("kmeans")
-    scaler     = _A.get("m1", {}).get("scaler")
     cluster_df = _A.get("m1", {}).get("df")
 
-    FEATURES = [
-        "passes_attempted", "shots", "tackles", "interceptions", "clearances",
-        "carry_distance", "progressive_carries", "key_passes",
-        "progressive_passes", "pressures", "dribbles_completed",
-    ]
-    # Data-driven archetype labels written by Model 1 (cluster id -> name).
-    # Built from the cluster centroids at training time, so they describe what
-    # each cluster actually is rather than a fixed guess.
-    ARCHETYPE_NAMES: dict[int, str] = {}
-    if cluster_df is not None and "archetype" in cluster_df.columns:
-        ARCHETYPE_NAMES = {
-            int(c): str(a)
-            for c, a in cluster_df[["cluster_kmeans", "archetype"]]
-            .drop_duplicates()
+    # Player archetypes come from the precomputed final_player_archetype
+    # column in player_clusters.parquet (Model 1's dual-axis spatial+style
+    # clustering, run offline over the full historical dataset), looked up by
+    # player_id. There is no cheap, correct way to re-predict an archetype
+    # live for a player missing from that table: the spatial axis needs
+    # avg_x_start/avg_y_start (not part of this per-match-stats query) and the
+    # style axis needs the full per-90 feature vector + GMM posterior. Players
+    # missing from the parquet (e.g. below Model 1's training thresholds) are
+    # simply labelled "Unclassified" rather than guessed.
+    archetype_by_player: dict[int, str] = {}
+    if (cluster_df is not None
+            and "player_id" in cluster_df.columns
+            and "final_player_archetype" in cluster_df.columns):
+        archetype_by_player = {
+            int(pid): str(arch)
+            for pid, arch in cluster_df[["player_id", "final_player_archetype"]]
+            .drop_duplicates(subset="player_id")
             .itertuples(index=False, name=None)
         }
 
@@ -534,30 +684,23 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
                    AVG(pms.pressures)            AS pressures
             FROM player_match_stats pms
             JOIN players p ON p.player_id = pms.player_id
-            WHERE pms.team_id = %s
+            JOIN matches m ON m.match_id = pms.match_id
+            WHERE pms.team_id = %s""" + season_sql + """
             GROUP BY p.player_id, p.player_name
             HAVING COUNT(*) >= 3
             ORDER BY AVG(pms.xa + pms.xg) DESC
             LIMIT 12
             """,
-            (team_id,),
+            tuple([team_id] + season_params),
         )
         if rows:
             logger.info("/api/player-efficiency team=%d: %d players from DB", team_id, len(rows))
             rows = [dict(r) for r in rows]
 
-            cluster_map: dict[str, str] = {}
-            if cluster_df is not None and "team_id" in cluster_df.columns and "archetype" in cluster_df.columns:
-                team_clusters = cluster_df[cluster_df["team_id"] == team_id]
-                for _, cr in team_clusters.iterrows():
-                    cluster_map[str(cr["player_name"])] = str(cr["archetype"])
-
             for r in rows:
-                if r["player_name"] in cluster_map:
-                    r["player_type"] = cluster_map[r["player_name"]]
-                else:
-                    cid = _predict_cluster(r, FEATURES, kmeans, scaler)
-                    r["player_type"] = ARCHETYPE_NAMES.get(cid, "Unclassified")
+                r["player_type"] = archetype_by_player.get(
+                    int(r["player_id"]), "Unclassified"
+                )
 
             leader = rows[0]
             radar  = _build_radar(leader)
@@ -581,11 +724,10 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
         if not team_df.empty:
             players_out = []
             for _, row in team_df.iterrows():
-                cid = int(row.get("cluster_kmeans", 0))
                 players_out.append({
                     "player_name":     str(row["player_name"]),
-                    "position":        str(row.get("position") or "-"),
-                    "player_type":     str(row.get("archetype") or ARCHETYPE_NAMES.get(cid, "Unclassified")),
+                    "position":        str(row.get("spatial_cluster_name") or "-"),
+                    "player_type":     str(row.get("final_player_archetype") or "Unclassified"),
                     "matches":         int(row.get("matches_played", 10)),
                     "minutes":         int(row.get("matches_played", 10)) * 85,
                     "xg_per_90":       round(float(row.get("shots") or 2) * 0.10, 2),
@@ -613,8 +755,9 @@ def player_efficiency(team_id: int) -> dict[str, Any]:
 # =============================================================================
 
 @app.get("/api/team-cohesion")
-def team_cohesion(team_id: int) -> dict[str, Any]:
+def team_cohesion(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
 
     feat_df = _A.get("m2", {}).get("feat_df")
     gbr     = _A.get("m2", {}).get("gbr")
@@ -638,13 +781,21 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 
     if feat_df is not None and "team_id" in feat_df.columns:
         team_feats = feat_df[feat_df["team_id"] == team_id]
+        if _has_season(season) and "season" in team_feats.columns:
+            team_feats = team_feats[team_feats["season"] == season]
         if not team_feats.empty:
             avg = team_feats[GRAPH_FEATURES].fillna(0).mean()
+            # Real average degree of an undirected graph = 2E / V, averaged over
+            # the team's matches. (The old code mistakenly reported the node
+            # count here.)
+            n_nodes = float(avg.get("n_nodes", 0))
+            n_edges = float(avg.get("n_edges", 0))
+            avg_degree = (2 * n_edges / n_nodes) if n_nodes else 0.0
             kpi_from_artifact = {
-                "cohesion_index":   round(float(avg.get("network_density", 0)), 2),
                 "network_density":  round(float(avg.get("network_density", 0)), 2),
-                "avg_degree":       round(float(avg.get("n_nodes", 0)), 1),
+                "avg_degree":       round(avg_degree, 1),
                 "clustering_coeff": round(float(avg.get("clustering_coefficient", 0)), 2),
+                "mean_betweenness": round(float(avg.get("mean_betweenness", 0)), 3),
             }
             # Prediction uses the full feature vector the model was trained on.
             have_ctx = all(c in team_feats.columns for c in CONTEXT_FEATURES)
@@ -665,13 +816,14 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
                    SUM(pne.pass_count) AS volume
             FROM pass_network_edges pne
             JOIN players p ON p.player_id = pne.passer_id
-            WHERE pne.team_id = %s
+            JOIN matches m ON m.match_id = pne.match_id
+            WHERE pne.team_id = %s""" + season_sql + """
             GROUP BY p.player_name
             HAVING SUM(pne.pass_count) > 0
             ORDER BY SUM(pne.pass_count) DESC
             LIMIT 16
             """,
-            (team_id,),
+            tuple([team_id] + season_params),
         )
         nodes = [{
             "name":   r["name"],
@@ -679,6 +831,33 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
             "y":      round(float(r["y"]), 1),
             "volume": int(r["volume"]),
         } for r in node_rows if r["x"] is not None and r["y"] is not None]
+
+        # True passing degree per player = number of distinct team-mates they
+        # exchange passes with (as passer OR receiver), over the whole season.
+        # Derived directly from the full edge table — NOT the capped edge list
+        # the frontend draws — so the "Best Connected" table is accurate.
+        deg_rows = _query(
+            """
+            SELECT p.player_name AS name, COUNT(DISTINCT t.partner) AS degree
+            FROM (
+                SELECT pne.passer_id AS player, pne.receiver_id AS partner
+                FROM pass_network_edges pne
+                JOIN matches m ON m.match_id = pne.match_id
+                WHERE pne.team_id = %s""" + season_sql + """ AND pne.pass_count > 0
+                UNION
+                SELECT pne.receiver_id AS player, pne.passer_id AS partner
+                FROM pass_network_edges pne
+                JOIN matches m ON m.match_id = pne.match_id
+                WHERE pne.team_id = %s""" + season_sql + """ AND pne.pass_count > 0
+            ) t
+            JOIN players p ON p.player_id = t.player
+            GROUP BY p.player_name
+            """,
+            tuple([team_id] + season_params + [team_id] + season_params),
+        )
+        deg_by_name = {r["name"]: int(r["degree"]) for r in deg_rows}
+        for n in nodes:
+            n["degree"] = deg_by_name.get(n["name"], 0)
     except Exception as exc:
         logger.warning("/api/team-cohesion team=%d node error: %s", team_id, exc)
 
@@ -691,21 +870,28 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
             FROM pass_network_edges pne
             JOIN players p1 ON p1.player_id = pne.passer_id
             JOIN players p2 ON p2.player_id = pne.receiver_id
-            WHERE pne.team_id = %s
+            JOIN matches m ON m.match_id = pne.match_id
+            WHERE pne.team_id = %s""" + season_sql + """
             GROUP BY p1.player_name, p2.player_name
             ORDER BY AVG(pne.pass_count) DESC
-            LIMIT 20
+            LIMIT 40
             """,
-            (team_id,),
+            tuple([team_id] + season_params),
         )
         if edges:
             logger.info("/api/team-cohesion team=%d: %d edges from DB", team_id, len(edges))
-            weights = [float(e["weight"] or 0) for e in edges]
+            # DB-only fallback (no model2 artifact loaded): derive degree from the
+            # distinct passer/receiver links actually returned. These are
+            # approximate (the edge list is capped), and betweenness isn't
+            # available without the full per-match graph, so it's left null.
+            n_nodes_db = len({e["passer"] for e in edges} | {e["receiver"] for e in edges})
+            avg_degree_db = (2 * len(edges) / n_nodes_db) if n_nodes_db else 0.0
+            possible = n_nodes_db * (n_nodes_db - 1)
             kpi_db = {
-                "cohesion_index":   round(sum(weights) / (len(weights) * 10), 2),
-                "network_density":  round(min(1.0, len(edges) / 30), 2),
-                "avg_degree":       round((2 * len(edges)) / 11, 1),
-                "clustering_coeff": round(min(1.0, sum(weights) / (len(weights) * 12)), 2),
+                "network_density":  round(min(1.0, len(edges) / possible), 2) if possible else 0.0,
+                "avg_degree":       round(avg_degree_db, 1),
+                "clustering_coeff": None,
+                "mean_betweenness": None,
             }
             final_kpi = kpi_from_artifact if kpi_from_artifact else kpi_db
             if predicted_goals is not None:
@@ -730,8 +916,8 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 
     logger.warning("/api/team-cohesion team=%d: using fallback", team_id)
     return {
-        "kpi": {"cohesion_index": 0.82, "network_density": 0.74,
-                "avg_degree": 8.2, "clustering_coeff": 0.68},
+        "kpi": {"network_density": 0.74, "avg_degree": 15.4,
+                "clustering_coeff": 0.81, "mean_betweenness": 0.077},
         "edges": [
             {"from": "Player A", "to": "Player B", "weight": 8.0},
             {"from": "Player B", "to": "Player C", "weight": 7.0},
@@ -745,19 +931,8 @@ def team_cohesion(team_id: int) -> dict[str, Any]:
 # /api/xg-finishing  (Model: from-scratch xG)
 # =============================================================================
 
-def _xg_team_diff(team_id: int):
-    """Team goals minus expected goals (finishing). None if no xG data."""
-    shots = _A.get("mxg", {}).get("shots")
-    if shots is None or "team_id" not in shots.columns:
-        return None
-    ts = shots[shots["team_id"] == team_id]
-    if ts.empty:
-        return None
-    return round(float(ts["is_goal"].sum()) - float(ts["xg_pred"].sum()), 1)
-
-
 @app.get("/api/xg-finishing")
-def xg_finishing(team_id: int) -> dict[str, Any]:
+def xg_finishing(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
 
     shots = _A.get("mxg", {}).get("shots")
@@ -766,6 +941,9 @@ def xg_finishing(team_id: int) -> dict[str, Any]:
         return {"players": [], "kpi": {}, "source": "fallback"}
 
     ts = shots[shots["team_id"] == team_id]
+    mids = _season_match_ids(season)
+    if mids is not None and "match_id" in ts.columns:
+        ts = ts[ts["match_id"].isin(mids)]
     if ts.empty:
         return {"players": [], "kpi": {}, "source": "artifact"}
 
@@ -847,13 +1025,14 @@ def _xg_pred_lookup() -> dict[int, float]:
 
 
 @app.get("/api/shot-map")
-def shot_map(team_id: int) -> dict[str, Any]:
+def shot_map(team_id: int, season: str | None = None) -> dict[str, Any]:
     """All shots taken by a team, with pitch coordinates and xG.
 
     Coordinates are StatsBomb pitch units (x 0-120 toward goal, y 0-80).
     xG is our from-scratch model's prediction (falls back to statsbomb_xg).
     """
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
     xgp = _xg_pred_lookup()
     try:
         rows = _query(
@@ -862,10 +1041,11 @@ def shot_map(team_id: int) -> dict[str, Any]:
                    s.statsbomb_xg, s.is_goal, p.player_name
             FROM shots s
             JOIN players p ON p.player_id = s.player_id
-            WHERE s.team_id = %s AND s.x IS NOT NULL AND s.y IS NOT NULL
+            JOIN matches m ON m.match_id = s.match_id
+            WHERE s.team_id = %s AND s.x IS NOT NULL AND s.y IS NOT NULL""" + season_sql + """
             ORDER BY s.minute
             """,
-            (team_id,),
+            tuple([team_id] + season_params),
         )
     except Exception as exc:
         logger.warning("/api/shot-map team=%d DB error: %s", team_id, exc)
@@ -1007,8 +1187,9 @@ def league_xg(season: str = "2015/2016") -> dict[str, Any]:
 # =============================================================================
 
 @app.get("/api/matches")
-def matches(team_id: int) -> dict[str, Any]:
+def matches(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
     try:
         rows = _query(
             """
@@ -1018,11 +1199,11 @@ def matches(team_id: int) -> dict[str, Any]:
             FROM matches m
             JOIN teams th ON th.team_id = m.home_team_id
             JOIN teams ta ON ta.team_id = m.away_team_id
-            WHERE m.home_team_id = %s OR m.away_team_id = %s
+            WHERE (m.home_team_id = %s OR m.away_team_id = %s)""" + season_sql + """
             ORDER BY m.match_date DESC NULLS LAST
             LIMIT 40
             """,
-            (team_id, team_id),
+            tuple([team_id, team_id] + season_params),
         )
     except Exception as exc:
         logger.warning("/api/matches team=%d DB error: %s", team_id, exc)
@@ -1124,8 +1305,9 @@ def _injury_response(players: list, source: str) -> dict[str, Any]:
 
 
 @app.get("/api/injury-risk")
-def injury_risk(team_id: int) -> dict[str, Any]:
+def injury_risk(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
 
     m3     = _A.get("m3", {})
     model  = m3.get("xgb") or m3.get("rf")
@@ -1162,13 +1344,13 @@ def injury_risk(team_id: int) -> dict[str, Any]:
             JOIN player_match_features pmf ON pmf.stat_id  = pms.stat_id
             JOIN players p                 ON p.player_id  = pms.player_id
             JOIN matches  m                ON m.match_id   = pms.match_id
-            WHERE pms.team_id = %s
+            WHERE pms.team_id = %s""" + season_sql + """
             GROUP BY p.player_id, p.player_name
             HAVING COUNT(*) >= 3
             ORDER BY AVG(pms.minutes_played) DESC
             LIMIT 15
             """,
-            (team_id,),
+            tuple([team_id] + season_params),
         )
     except Exception as exc:
         logger.warning("/api/injury-risk team=%d query error: %s", team_id, exc)
@@ -1200,8 +1382,9 @@ def injury_risk(team_id: int) -> dict[str, Any]:
 # =============================================================================
 
 @app.get("/api/win-probability")
-def win_probability(team_id: int) -> dict[str, Any]:
+def win_probability(team_id: int, season: str | None = None) -> dict[str, Any]:
     _validate_team_id(team_id)
+    season_sql, season_params = _season_filter(season)
 
     m5     = _A.get("m5", {})
     gbc    = m5.get("gbc_pre")
@@ -1213,101 +1396,78 @@ def win_probability(team_id: int) -> dict[str, Any]:
         "avg_pass_acc_last5", "avg_tackles_last5", "avg_pressures_last5",
         "red_cards_match", "subs_made", "is_home",
     ]
+    # Subset of the model's features that is meaningful to surface to users as
+    # "what the model looks at" (rolling pre-match form). Labels for the UI.
+    INPUT_LABELS = {
+        "avg_xg_last5":      "Avg xG (last 5)",
+        "avg_shots_last5":   "Avg shots (last 5)",
+        "avg_pass_acc_last5": "Pass accuracy (last 5)",
+        "avg_pressures_last5": "Avg pressures (last 5)",
+    }
 
     win = draw = loss = None
+    inputs: dict[str, float] = {}
     source = "fallback"
 
-    db_available = _db_ok()
-
-    if db_available:
+    # Primary path: Model 5's own pre-match feature table (features_pre.parquet),
+    # which stores the *correct* rolling-form features it was trained on. We
+    # predict each of the team's matches and average the probabilities — i.e.
+    # "the model's typical pre-match call for this team" — rather than averaging
+    # the inputs and predicting once (which is statistically wrong and was
+    # producing nonsensical draw-heavy numbers).
+    if df_pre is not None and gbc is not None and scaler is not None:
         try:
-            latest = _query(
-                """
-                SELECT
-                    AVG(xg)               AS avg_xg,
-                    AVG(shots)            AS avg_shots,
-                    AVG(passes_attempted) AS avg_passes,
-                    AVG(pass_accuracy)    AS avg_pass_acc,
-                    AVG(tackles)          AS avg_tackles,
-                    AVG(pressures)        AS avg_pressures
-                FROM (
-                    SELECT pms.xg, pms.shots, pms.passes_attempted,
-                           pms.pass_accuracy, pms.tackles, pms.pressures
-                    FROM player_match_stats pms
-                    JOIN matches m ON m.match_id = pms.match_id
-                    WHERE pms.team_id = %s
-                    ORDER BY m.match_date DESC
-                    LIMIT 5
-                ) recent
-                """,
-                (team_id,),
-            )
+            rows = df_pre[df_pre["team_id"] == team_id] \
+                if "team_id" in df_pre.columns else df_pre
+            if _has_season(season) and "season" in rows.columns:
+                rows = rows[rows["season"] == season]
 
-            if latest and gbc and scaler:
-                r = latest[0]
-                X = np.array([[
-                    float(r.get("avg_xg") or 0),
-                    float(r.get("avg_shots") or 0),
-                    float(r.get("avg_passes") or 0),
-                    float(r.get("avg_pass_acc") or 0),
-                    float(r.get("avg_tackles") or 0),
-                    float(r.get("avg_pressures") or 0),
-                    0, 3, 1,
-                ]])
-                X_sc  = scaler.transform(X)
-                proba = gbc.predict_proba(X_sc)[0]
-                classes = list(gbc.classes_)
-                p_map = {c: proba[i] for i, c in enumerate(classes)}
-                win    = round(float(p_map.get(2, 0)) * 100, 1)
-                draw   = round(float(p_map.get(1, 0)) * 100, 1)
-                loss   = round(float(p_map.get(0, 0)) * 100, 1)
-                source = "database+model5"
+            if not rows.empty:
+                X = rows[FEATURES_PRE].fillna(0).values
+                proba = gbc.predict_proba(scaler.transform(X)).mean(axis=0)
+                cls = list(gbc.classes_)
+                p_map = {c: proba[i] for i, c in enumerate(cls)}
+                win  = round(float(p_map.get(2, 0)) * 100, 1)
+                draw = round(float(p_map.get(1, 0)) * 100, 1)
+                loss = round(float(p_map.get(0, 0)) * 100, 1)
+                source = "artifact"
+
+                means = rows[FEATURES_PRE].fillna(0).mean()
+                inputs = {
+                    key: round(float(means.get(key, 0)), 2)
+                    for key in INPUT_LABELS
+                }
                 logger.info(
-                    "/api/win-probability team=%d: win=%.1f draw=%.1f loss=%.1f (model)",
-                    team_id, win, draw, loss,
+                    "/api/win-probability team=%d season=%s: win=%.1f draw=%.1f "
+                    "loss=%.1f over %d matches", team_id, season, win, draw, loss, len(rows),
                 )
+        except Exception as exc:
+            logger.warning("/api/win-probability team=%d artifact error: %s", team_id, exc)
+            _last_errors["win_probability"] = str(exc)
 
-            elif latest:
-                raw = _query(
-                    """
-                    SELECT AVG(CASE WHEN result='win'  THEN 1.0 ELSE 0.0 END) AS win_rate,
-                           AVG(CASE WHEN result='draw' THEN 1.0 ELSE 0.0 END) AS draw_rate,
-                           AVG(CASE WHEN result='loss' THEN 1.0 ELSE 0.0 END) AS loss_rate
-                    FROM player_match_stats
-                    WHERE team_id = %s AND result IS NOT NULL
-                    """,
-                    (team_id,),
-                )
-                rates = raw[0] if raw else {}
-                win    = round(float(rates.get("win_rate") or 0) * 100, 1)
-                draw   = round(float(rates.get("draw_rate") or 0) * 100, 1)
-                loss   = round(float(rates.get("loss_rate") or 0) * 100, 1)
+    # Fallback: no model/feature artifact — use the team's actual outcome rates.
+    if win is None and _db_ok():
+        try:
+            raw = _query(
+                """
+                SELECT AVG(CASE WHEN pms.result='win'  THEN 1.0 ELSE 0.0 END) AS win_rate,
+                       AVG(CASE WHEN pms.result='draw' THEN 1.0 ELSE 0.0 END) AS draw_rate,
+                       AVG(CASE WHEN pms.result='loss' THEN 1.0 ELSE 0.0 END) AS loss_rate
+                FROM player_match_stats pms
+                JOIN matches m ON m.match_id = pms.match_id
+                WHERE pms.team_id = %s AND pms.result IS NOT NULL""" + season_sql + """
+                """,
+                tuple([team_id] + season_params),
+            )
+            rates = raw[0] if raw else {}
+            if rates and rates.get("win_rate") is not None:
+                win  = round(float(rates.get("win_rate")  or 0) * 100, 1)
+                draw = round(float(rates.get("draw_rate") or 0) * 100, 1)
+                loss = round(float(rates.get("loss_rate") or 0) * 100, 1)
                 source = "database"
-
         except Exception as exc:
             logger.warning("/api/win-probability team=%d DB error: %s", team_id, exc)
             _last_errors["win_probability"] = str(exc)
-
-    if win is None and df_pre is not None and gbc and scaler:
-        try:
-            team_rows = (
-                df_pre[df_pre["team_id"] == team_id]
-                if "team_id" in df_pre.columns
-                else df_pre
-            ).tail(5)
-
-            if not team_rows.empty:
-                avgs = team_rows[FEATURES_PRE].fillna(0).mean()
-                X_sc  = scaler.transform(avgs.values.reshape(1, -1))
-                proba  = gbc.predict_proba(X_sc)[0]
-                classes = list(gbc.classes_)
-                p_map  = {c: proba[i] for i, c in enumerate(classes)}
-                win    = round(float(p_map.get(2, 0)) * 100, 1)
-                draw   = round(float(p_map.get(1, 0)) * 100, 1)
-                loss   = round(float(p_map.get(0, 0)) * 100, 1)
-                source = "artifact"
-        except Exception as exc:
-            logger.warning("/api/win-probability team=%d artifact error: %s", team_id, exc)
 
     if win is None:
         offset = team_id % 4
@@ -1317,19 +1477,19 @@ def win_probability(team_id: int) -> dict[str, Any]:
         source = "fallback"
         logger.info("/api/win-probability team=%d: using fallback", team_id)
 
-    minutes     = list(range(91))
-    series_win  = [max(0, min(100, round(win  + (m - 45) * 0.08, 1))) for m in minutes]
-    series_draw = [max(0, min(100, round(draw - abs(m - 45) * 0.03, 1))) for m in minutes]
-    series_loss = [round(max(0, 100 - series_win[i] - series_draw[i]), 1) for i in range(91)]
+    # Actual outcome record for the team over the (optionally season-filtered)
+    # set of matches — concrete context alongside the model's averaged
+    # probabilities. The dataset is historical, so there is no "next match".
+    record = _team_record(team_id, season)
 
     return {
         "headline": {"win": win, "draw": draw, "loss": loss},
-        "timeline": {
-            "labels": minutes,
-            "win":    series_win,
-            "draw":   series_draw,
-            "loss":   series_loss,
-        },
+        "record": record,
+        "inputs": [
+            {"key": k, "label": INPUT_LABELS[k], "value": inputs[k]}
+            for k in INPUT_LABELS if k in inputs
+        ],
+        "season": season if _has_season(season) else None,
         "source": source,
     }
 
@@ -1337,27 +1497,6 @@ def win_probability(team_id: int) -> dict[str, Any]:
 # =============================================================================
 # Internal helpers
 # =============================================================================
-
-def _predict_cluster(row: dict, features: list, kmeans, scaler) -> int:
-    if kmeans is None or scaler is None:
-        return 0
-    try:
-        # Model 1 is trained on per-90 features. The row carries per-match
-        # averages plus total matches/minutes, so convert avg -> per-90
-        # (avg * matches / minutes * 90) to match the training representation.
-        matches = float(row.get("matches") or 0)
-        minutes = float(row.get("minutes") or 0)
-        vec = []
-        for f in features:
-            v = float(row.get(f) or 0)
-            if matches > 0 and minutes > 0:
-                v = v * matches / minutes * 90.0
-            vec.append(v)
-        X_sc = scaler.transform(np.array([vec]))
-        return int(kmeans.predict(X_sc)[0])
-    except Exception:
-        return 0
-
 
 def _build_radar(leader: dict) -> dict:
     return {
@@ -1373,82 +1512,38 @@ def _build_radar(leader: dict) -> dict:
     }
 
 
-def _m5_win_pct_direct(team_id: int) -> float:
-    """
-    Lightweight win-% used by /api/dashboard.
-    Must NOT call win_probability() to avoid infinite recursion.
-    """
-    m5     = _A.get("m5", {})
-    gbc    = m5.get("gbc_pre")
-    scaler = m5.get("scaler_pre")
-    df_pre = m5.get("df_pre")
-
-    if _db_ok():
-        try:
-            latest = _query(
-                """
-                SELECT AVG(xg) AS avg_xg, AVG(shots) AS avg_shots,
-                       AVG(passes_attempted) AS avg_passes,
-                       AVG(pass_accuracy) AS avg_pass_acc,
-                       AVG(tackles) AS avg_tackles, AVG(pressures) AS avg_pressures
-                FROM (
-                    SELECT pms.xg, pms.shots, pms.passes_attempted,
-                           pms.pass_accuracy, pms.tackles, pms.pressures
-                    FROM player_match_stats pms
-                    JOIN matches m ON m.match_id = pms.match_id
-                    WHERE pms.team_id = %s
-                    ORDER BY m.match_date DESC LIMIT 5
-                ) recent
-                """,
-                (team_id,),
-            )
-            if latest and gbc and scaler:
-                r = latest[0]
-                X = np.array([[
-                    float(r.get("avg_xg") or 0), float(r.get("avg_shots") or 0),
-                    float(r.get("avg_passes") or 0), float(r.get("avg_pass_acc") or 0),
-                    float(r.get("avg_tackles") or 0), float(r.get("avg_pressures") or 0),
-                    0, 3, 1,
-                ]])
-                X_sc  = scaler.transform(X)
-                proba  = gbc.predict_proba(X_sc)[0]
-                classes = list(gbc.classes_)
-                p_map  = {c: proba[i] for i, c in enumerate(classes)}
-                return round(float(p_map.get(2, 0)) * 100, 1)
-
-            if latest:
-                raw = _query(
-                    """SELECT AVG(CASE WHEN result='win' THEN 1.0 ELSE 0.0 END) AS win_rate
-                       FROM player_match_stats WHERE team_id=%s AND result IS NOT NULL""",
-                    (team_id,),
-                )
-                return round(float((raw[0]["win_rate"] or 0) if raw else 0) * 100, 1)
-        except Exception as exc:
-            logger.debug("_m5_win_pct_direct DB error team=%d: %s", team_id, exc)
-
-    if df_pre is not None and gbc and scaler:
-        try:
-            FEATURES_PRE = [
-                "avg_xg_last5", "avg_shots_last5", "avg_passes_last5",
-                "avg_pass_acc_last5", "avg_tackles_last5", "avg_pressures_last5",
-                "red_cards_match", "subs_made", "is_home",
-            ]
-            team_rows = (
-                df_pre[df_pre["team_id"] == team_id]
-                if "team_id" in df_pre.columns
-                else df_pre
-            ).tail(5)
-            if not team_rows.empty:
-                avgs  = team_rows[FEATURES_PRE].fillna(0).mean()
-                X_sc  = scaler.transform(avgs.values.reshape(1, -1))
-                proba  = gbc.predict_proba(X_sc)[0]
-                classes = list(gbc.classes_)
-                p_map  = {c: proba[i] for i, c in enumerate(classes)}
-                return round(float(p_map.get(2, 0)) * 100, 1)
-        except Exception as exc:
-            logger.debug("_m5_win_pct_direct artifact error team=%d: %s", team_id, exc)
-
-    return round(60.0 + (team_id % 4) * 2, 1)
+def _team_record(team_id: int, season: str | None) -> dict[str, int]:
+    """Actual W/D/L record for a team over the (optionally season-filtered)
+    matches with a final score. Returns zeros on any error."""
+    season_sql, season_params = _season_filter(season)
+    try:
+        rows = _query(
+            """
+            SELECT
+              SUM(CASE WHEN (m.home_team_id = %s AND m.home_score > m.away_score)
+                         OR (m.away_team_id = %s AND m.away_score > m.home_score)
+                       THEN 1 ELSE 0 END) AS wins,
+              SUM(CASE WHEN m.home_score = m.away_score THEN 1 ELSE 0 END) AS draws,
+              SUM(CASE WHEN (m.home_team_id = %s AND m.home_score < m.away_score)
+                         OR (m.away_team_id = %s AND m.away_score < m.home_score)
+                       THEN 1 ELSE 0 END) AS losses,
+              COUNT(*) AS played
+            FROM matches m
+            WHERE (m.home_team_id = %s OR m.away_team_id = %s)
+              AND m.home_score IS NOT NULL AND m.away_score IS NOT NULL""" + season_sql + """
+            """,
+            tuple([team_id] * 6 + season_params),
+        )
+        r = rows[0] if rows else {}
+        return {
+            "wins":   int(r.get("wins")   or 0),
+            "draws":  int(r.get("draws")  or 0),
+            "losses": int(r.get("losses") or 0),
+            "played": int(r.get("played") or 0),
+        }
+    except Exception as exc:
+        logger.debug("_team_record team=%d error: %s", team_id, exc)
+        return {"wins": 0, "draws": 0, "losses": 0, "played": 0}
 
 
 # =============================================================================

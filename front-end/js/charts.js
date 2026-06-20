@@ -20,13 +20,6 @@ const C = {
 
 const gridColor = 'rgba(56, 189, 131, 0.06)';
 
-function makeGradient(ctx, colorStart, colorEnd, height = 200) {
-  const grad = ctx.createLinearGradient(0, 0, 0, height);
-  grad.addColorStop(0, colorStart);
-  grad.addColorStop(1, colorEnd);
-  return grad;
-}
-
 function destroyChart(canvas) {
   const existing = Chart.getChart(canvas);
   if (existing) existing.destroy();
@@ -62,46 +55,6 @@ function makeScales(opts = {}) {
 }
 
 const Charts = {
-
-  // ── Performance trend (line) ──────────────────────────────────────────────
-  initPerfTrend(payload) {
-    const canvas = document.getElementById('perfTrendChart');
-    if (!canvas || !payload) return;
-    destroyChart(canvas);
-    const ctx  = canvas.getContext('2d');
-    const grad = makeGradient(ctx, 'rgba(56,189,131,0.2)', 'rgba(56,189,131,0)', 200);
-
-    new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels:   payload.labels,
-        datasets: [{
-          label:              'Performance Score',
-          data:               payload.values,
-          borderColor:        C.accent,
-          backgroundColor:    grad,
-          borderWidth:        2,
-          pointBackgroundColor: C.accent,
-          pointRadius:        4,
-          pointHoverRadius:   6,
-          tension:            0.4,
-          fill:               true,
-        }],
-      },
-      options: {
-        responsive:          true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend:  { display: false },
-          tooltip: {
-            ...tooltipDefaults,
-            callbacks: { label: ctx => ` Score: ${ctx.raw}` },
-          },
-        },
-        scales: makeScales({ y: { min: 60, max: 100 } }),
-      },
-    });
-  },
 
   // ── Player radar ──────────────────────────────────────────────────────────
   initRadar(payload, playerName = 'Player') {
@@ -251,86 +204,6 @@ const Charts = {
     });
   },
 
-  // ── Win probability timeline ──────────────────────────────────────────────
-  initWinProb(payload) {
-    const canvas = document.getElementById('winProbChart');
-    if (!canvas || !payload) return;
-    destroyChart(canvas);
-
-    new Chart(canvas.getContext('2d'), {
-      type: 'line',
-      data: {
-        labels:   payload.labels,
-        datasets: [
-          {
-            label:           'Win',
-            data:            payload.win,
-            borderColor:     C.accent,
-            backgroundColor: 'rgba(56,189,131,0.05)',
-            borderWidth:     2,
-            tension:         0.4,
-            fill:            false,
-            pointRadius:     0,
-            pointHoverRadius:4,
-          },
-          {
-            label:       'Draw',
-            data:        payload.draw,
-            borderColor: C.amber,
-            borderWidth: 1.5,
-            tension:     0.4,
-            fill:        false,
-            pointRadius: 0,
-            borderDash:  [4, 4],
-          },
-          {
-            label:       'Loss',
-            data:        payload.loss,
-            borderColor: C.red,
-            borderWidth: 1.5,
-            tension:     0.4,
-            fill:        false,
-            pointRadius: 0,
-          },
-        ],
-      },
-      options: {
-        responsive:          true,
-        maintainAspectRatio: false,
-        interaction:         { mode: 'index', intersect: false },
-        plugins: {
-          legend: {
-            position: 'bottom',
-            labels: {
-              usePointStyle: true,
-              color:         '#8896aa',
-              font:          { size: 11, family: "'IBM Plex Mono', monospace" },
-              padding:       16,
-            },
-          },
-          tooltip: {
-            ...tooltipDefaults,
-            callbacks: {
-              title: ctx  => `Minute ${ctx[0].label}`,
-              label: ctx  => ` ${ctx.dataset.label}: ${ctx.raw}%`,
-            },
-          },
-        },
-        scales: makeScales({
-          x: {
-            title:   { display: true, text: 'Match Minute', color: '#4a5568', font: { size: 10 } },
-            ticks:   { maxTicksLimit: 10 },
-          },
-          y: {
-            min:   0,
-            max:   100,
-            title: { display: true, text: 'Probability (%)', color: '#4a5568', font: { size: 10 } },
-          },
-        }),
-      },
-    });
-  },
-
   // ── Goals vs xG (grouped bars) ────────────────────────────────────────────
   initXGChart(players) {
     const canvas = document.getElementById('xgChart');
@@ -382,9 +255,13 @@ const Charts = {
     });
   },
 
-  // ── Shot map (scatter on an attacking-half pitch) ─────────────────────────
-  // StatsBomb coords: x 0-120 (goal at 120), y 0-80. We show the attacking
-  // half (x 60-120). Point radius scales with xG; colour marks goal vs miss.
+  // ── Shot map (scatter on an attacking-third pitch, goal at TOP) ────────────
+  // StatsBomb coords: x 0-120 (goal at 120), y 0-80. We render vertically so
+  // the pitch keeps its true proportions inside the card: the horizontal axis
+  // is the pitch width (SB y, 0-80) and the vertical axis is the pitch length
+  // (SB x, 60-120) with the goal at the top. The container enforces a fixed
+  // aspect ratio (see .shot-map-wrap), so the pitch is never stretched.
+  // Point radius scales with xG; colour marks goal vs miss.
   initShotMap(shots) {
     const canvas = document.getElementById('shotMapChart');
     if (!canvas) return;
@@ -393,9 +270,15 @@ const Charts = {
 
     const goals  = shots.filter(s => s.is_goal);
     const misses = shots.filter(s => !s.is_goal);
-    const r = s => 3 + Math.sqrt(Math.max(0, s.xg)) * 16;
+    const r = s => 3 + Math.sqrt(Math.max(0, s.xg)) * 15;
 
-    // Plugin: draw pitch markings (penalty box, 6-yard box, goal, arc).
+    // Axis ranges (with a small margin) — kept in sync with the container's
+    // aspect-ratio so the drawn pitch is proportional. width 84, length 64.
+    const X_MIN = -2, X_MAX = 82;   // pitch width  (SB y)
+    const Y_MIN = 58, Y_MAX = 122;  // pitch length (SB x), goal near top
+
+    // Plugin: draw pitch markings (penalty box, 6-yard box, goal, spot).
+    // X maps SB y → horizontal pixels; Y maps SB x → vertical pixels.
     const pitch = {
       id: 'pitch',
       beforeDatasetsDraw(chart) {
@@ -403,21 +286,25 @@ const Charts = {
         const X = v => scales.x.getPixelForValue(v);
         const Y = v => scales.y.getPixelForValue(v);
         ctx.save();
-        ctx.strokeStyle = 'rgba(56,189,131,0.30)';
+        ctx.strokeStyle = 'rgba(56,189,131,0.28)';
         ctx.lineWidth = 1;
-        // outer (attacking half)
+        // outer (attacking third shown)
         ctx.strokeRect(a.left, a.top, a.right - a.left, a.bottom - a.top);
-        // penalty box: x 102-120, y 18-62
-        ctx.strokeRect(X(102), Y(62), X(120) - X(102), Y(18) - Y(62));
-        // six-yard box: x 114-120, y 30-50
-        ctx.strokeRect(X(114), Y(50), X(120) - X(114), Y(30) - Y(50));
-        // goal: x 120, y 36-44
+        // penalty box: SB x 102-120, y 18-62
+        ctx.strokeRect(X(18), Y(120), X(62) - X(18), Y(102) - Y(120));
+        // six-yard box: SB x 114-120, y 30-50
+        ctx.strokeRect(X(30), Y(120), X(50) - X(30), Y(114) - Y(120));
+        // penalty arc (the "D")
+        ctx.beginPath();
+        ctx.arc(X(40), Y(108), Math.abs(Y(108) - Y(98)), Math.PI * 0.18, Math.PI * 0.82);
+        ctx.stroke();
+        // goal: SB x 120, y 36-44
         ctx.strokeStyle = 'rgba(56,189,131,0.7)';
         ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.moveTo(X(120), Y(36)); ctx.lineTo(X(120), Y(44)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(X(36), Y(120)); ctx.lineTo(X(44), Y(120)); ctx.stroke();
         // penalty spot
-        ctx.fillStyle = 'rgba(56,189,131,0.4)';
-        ctx.beginPath(); ctx.arc(X(108), Y(40), 2, 0, 2 * Math.PI); ctx.fill();
+        ctx.fillStyle = 'rgba(56,189,131,0.45)';
+        ctx.beginPath(); ctx.arc(X(40), Y(108), 2, 0, 2 * Math.PI); ctx.fill();
         ctx.restore();
       },
     };
@@ -428,8 +315,8 @@ const Charts = {
         datasets: [
           {
             label: 'Goals',
-            data: goals.map(s => ({ x: s.x, y: s.y, _s: s })),
-            backgroundColor: 'rgba(56,189,131,0.75)',
+            data: goals.map(s => ({ x: s.y, y: s.x, _s: s })),
+            backgroundColor: 'rgba(56,189,131,0.78)',
             borderColor: C.accent,
             borderWidth: 1,
             pointRadius: ctx => r(ctx.raw._s),
@@ -437,9 +324,9 @@ const Charts = {
           },
           {
             label: 'Shots (no goal)',
-            data: misses.map(s => ({ x: s.x, y: s.y, _s: s })),
-            backgroundColor: 'rgba(136,150,170,0.30)',
-            borderColor: 'rgba(136,150,170,0.6)',
+            data: misses.map(s => ({ x: s.y, y: s.x, _s: s })),
+            backgroundColor: 'rgba(136,150,170,0.28)',
+            borderColor: 'rgba(136,150,170,0.55)',
             borderWidth: 1,
             pointRadius: ctx => r(ctx.raw._s),
             pointHoverRadius: ctx => r(ctx.raw._s) + 2,
@@ -449,12 +336,9 @@ const Charts = {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: { padding: 0 },
         plugins: {
-          legend: {
-            position: 'bottom',
-            labels: { usePointStyle: true, color: '#8896aa',
-                      font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16 },
-          },
+          legend: { display: false },
           tooltip: {
             ...tooltipDefaults,
             callbacks: {
@@ -468,8 +352,8 @@ const Charts = {
           },
         },
         scales: {
-          x: { min: 60, max: 122, display: false, grid: { display: false } },
-          y: { min: 0,  max: 80,  display: false, grid: { display: false }, reverse: true },
+          x: { min: X_MIN, max: X_MAX, display: false, grid: { display: false } },
+          y: { min: Y_MIN, max: Y_MAX, display: false, grid: { display: false } },
         },
       },
       plugins: [pitch],
@@ -533,7 +417,7 @@ const Charts = {
             ...tooltipDefaults,
             callbacks: {
               label: ctx => ctx.raw._g
-                ? ` ⚽ ${ctx.raw._g.player} (${ctx.raw._g.x}')`
+                ? ` Goal — ${ctx.raw._g.player} (${ctx.raw._g.x}')`
                 : ` ${ctx.dataset.label}: ${Number(ctx.raw.y).toFixed(2)} xG`,
             },
           },
@@ -544,6 +428,158 @@ const Charts = {
           y: { min: 0,
                title: { display: true, text: 'Cumulative xG', color: '#4a5568', font: { size: 10 } } },
         }),
+      },
+    });
+  },
+
+  // ── Generic histogram / bar (EDA distributions) ───────────────────────────
+  initSimpleBar(canvasId, labels, values, color = C.cyan, opts = {}) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    destroyChart(canvas);
+    if (!labels || !labels.length) return;
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data:                 values,
+          backgroundColor:      color,
+          borderRadius:         3,
+          borderSkipped:        false,
+          hoverBackgroundColor: C.accent,
+        }],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend:  { display: false },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${Number(ctx.raw).toLocaleString()}` },
+          },
+        },
+        scales: makeScales({
+          x: {
+            grid:  { display: false },
+            title: opts.xTitle
+              ? { display: true, text: opts.xTitle, color: '#4a5568', font: { size: 10 } }
+              : undefined,
+          },
+          y: {
+            beginAtZero: true,
+            title: opts.yTitle
+              ? { display: true, text: opts.yTitle, color: '#4a5568', font: { size: 10 } }
+              : undefined,
+          },
+        }),
+      },
+    });
+  },
+
+  // ── Doughnut (categorical counts, e.g. players by position) ────────────────
+  initDoughnut(canvasId, labels, values) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    destroyChart(canvas);
+    if (!labels || !labels.length) return;
+
+    const palette = [
+      C.accent, C.cyan, C.amber, C.purple, C.red,
+      '#3ecf8e', '#22d3ee', '#fbbf24', '#a78bfa', '#f87171',
+      '#10b981', '#60a5fa', '#f59e0b', '#c084fc', '#fb7185',
+    ];
+
+    new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{
+          data:            values,
+          backgroundColor: labels.map((_, i) => palette[i % palette.length]),
+          borderColor:     '#0a0e1a',
+          borderWidth:     2,
+        }],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        cutout:              '58%',
+        plugins: {
+          legend: {
+            position: 'right',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 10, family: "'IBM Plex Mono', monospace" }, padding: 10,
+              boxWidth: 8,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${ctx.label}: ${Number(ctx.raw).toLocaleString()}` },
+          },
+        },
+      },
+    });
+  },
+
+  // ── xG benchmark vs StatsBomb (dual-axis: ROC-AUC + log-loss) ──────────────
+  initXgBenchmark(canvasId, metrics) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !metrics) return;
+    destroyChart(canvas);
+
+    const labels = ['Our xG', 'StatsBomb', 'Naive baseline'];
+    const auc    = [metrics.roc_auc, metrics.statsbomb_roc_auc, 0.5];
+    const logloss = [metrics.log_loss, metrics.statsbomb_log_loss, metrics.naive_log_loss];
+
+    new Chart(canvas.getContext('2d'), {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'bar', label: 'ROC-AUC (higher is better)',
+            data: auc, yAxisID: 'y',
+            backgroundColor: C.accent, borderRadius: 3, borderSkipped: false,
+          },
+          {
+            type: 'bar', label: 'Log-loss (lower is better)',
+            data: logloss, yAxisID: 'y1',
+            backgroundColor: C.amber, borderRadius: 3, borderSkipped: false,
+          },
+        ],
+      },
+      options: {
+        responsive:          true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: {
+              usePointStyle: true, color: '#8896aa',
+              font: { size: 11, family: "'IBM Plex Mono', monospace" }, padding: 16,
+            },
+          },
+          tooltip: {
+            ...tooltipDefaults,
+            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(3)}` },
+          },
+        },
+        scales: {
+          x:  { grid: { display: false }, ticks: { color: '#8896aa', font: { size: 11 } } },
+          y:  {
+            position: 'left', min: 0, max: 1, grid: { color: gridColor },
+            ticks: { color: '#4a5568', font: { size: 10 } },
+            title: { display: true, text: 'ROC-AUC', color: '#4a5568', font: { size: 10 } },
+          },
+          y1: {
+            position: 'right', min: 0, grid: { display: false },
+            ticks: { color: '#4a5568', font: { size: 10 } },
+            title: { display: true, text: 'Log-loss', color: '#4a5568', font: { size: 10 } },
+          },
+        },
       },
     });
   },

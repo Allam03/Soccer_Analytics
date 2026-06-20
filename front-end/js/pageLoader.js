@@ -8,7 +8,7 @@
    real script and executes it.
    ============================================================ */
 
-const ASSET_VERSION = "2.6.0";
+const ASSET_VERSION = "2.12.3";
 
 const PAGES = [
   { id: "dashboard-content", file: "/static/pages/dashboard.html" },
@@ -17,6 +17,8 @@ const PAGES = [
   { id: "xg-content",        file: "/static/pages/xg.html"        },
   { id: "injury-content",    file: "/static/pages/injury.html"    },
   { id: "winprob-content",   file: "/static/pages/winprob.html"   },
+  { id: "eda-content",       file: "/static/pages/eda.html"       },
+  { id: "models-content",    file: "/static/pages/models.html"    },
   { id: "debug-content",     file: "/static/pages/debug.html"     },
 ].map((p) => ({ ...p, file: `${p.file}?v=${ASSET_VERSION}` }));
 
@@ -57,7 +59,7 @@ async function loadPage({ id, file }) {
           background:rgba(239,68,68,0.1);
           border:1px solid rgba(239,68,68,0.3);
           border-radius:8px; color:#ef4444; font-size:13px;">
-          ⚠️ Could not load page template: <strong>${file}</strong><br>
+          Could not load page template: <strong>${file}</strong><br>
           <span style="color:var(--text-secondary);font-size:11px">${err.message}</span>
         </div>`;
     }

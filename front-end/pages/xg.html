@@ -1,4 +1,5 @@
 <!-- pages/xg.html -->
+<div class="model-info" data-model="model_xg"></div>
 <div class="kpi-grid">
   <div class="kpi-card" data-tip="Sum of our model's expected goals for the team's shots">
     <div class="kpi-label">Team xG</div>
@@ -24,13 +25,15 @@
 
 <div class="card mb-16">
   <div class="card-title">Shot Map — all shots, sized by xG</div>
-  <div class="chart-wrap" style="height:320px">
+  <div class="shot-map-wrap">
     <canvas id="shotMapChart"></canvas>
   </div>
   <p class="text-muted fs-11 mt-8">
-    Each marker is a shot at its pitch location (attacking half, goal at right).
-    Marker size scales with xG; green = goal, grey = no goal. Hover for player,
-    xG, body part and minute.
+    Each marker is a shot at its pitch location (attacking third, goal at the top).
+    Marker size scales with xG;
+    <span style="color:var(--accent);font-weight:600">green = goal</span>,
+    <span style="color:#8896aa;font-weight:600">grey = no goal</span>.
+    Hover for player, xG, body part and minute.
   </p>
 </div>
 

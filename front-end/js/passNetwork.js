@@ -75,6 +75,11 @@ const PassNetwork = {
         size:      8 + (n.volume / maxVol) * 14,
         highlight: n.volume === maxVol,
         label:     _initials(n.name),
+        full:      n.name,
+        // True season totals from the DB. The drawn edge list is capped, so a
+        // node's real volume/degree must come from here, not from its edges.
+        volume:    n.volume,
+        degree:    n.degree,
       };
     }
     const maxW = Math.max(...edges.map(e => e.weight || 1), 1);
@@ -150,6 +155,19 @@ const PassNetwork = {
     const M = pitch ? 22 : 0;
     const px = (n) => ({ x: M + n.x * (W - 2 * M), y: M + n.y * (H - 2 * M) });
 
+    // Per-player passing volume (sum of edge weights touching the node) and
+    // degree (distinct team-mates linked), keyed by node id (= full name in the
+    // real modes). Used by the hover tooltip.
+    const vol = {}, links = {};
+    for (const e of edges) {
+      const w = e.weight || 1;
+      vol[e.from] = (vol[e.from] || 0) + w;
+      vol[e.to]   = (vol[e.to]   || 0) + w;
+      (links[e.from] = links[e.from] || new Set()).add(e.to);
+      (links[e.to]   = links[e.to]   || new Set()).add(e.from);
+    }
+    const esc = (s) => String(s).replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
     let html = `
       <defs>
         <filter id="nodeGlow" x="-50%" y="-50%" width="200%" height="200%">
@@ -205,18 +223,59 @@ const PassNetwork = {
       const fill   = n.highlight ? "#3ecf8e" : "#22d3ee";
       const filter = n.highlight ? "url(#nodeGlowStrong)" : "url(#nodeGlow)";
       const opacity = n.highlight ? 1 : 0.85;
+      // Label font scales with node radius so initials stay inside the marker.
+      const fs = Math.max(8, Math.min(12, n.size * 0.72));
+      // Hover data: full name + real passing volume / degree for this node.
+      // Prefer the node's true season volume (from the API) over the edge-summed
+      // value, since the edge list is capped and undercounts top passers.
+      const full = esc(n.full || id);
+      const v    = Math.round(n.volume != null ? n.volume : (vol[id] || 0));
+      const d    = n.degree != null ? n.degree : ((links[id]?.size) || 0);
+      const hover = `data-name="${full}" data-vol="${v}" data-deg="${d}" `
+        + `onmousemove="PassNetwork._tip(event)" onmouseleave="PassNetwork._hideTip()"`;
       html += `
         <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${n.size}"
-                fill="${fill}" fill-opacity="${opacity}" filter="${filter}"/>
-        <text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}"
+                fill="${fill}" fill-opacity="${opacity}" filter="${filter}"
+                style="cursor:pointer" ${hover}/>
+        <text x="${x.toFixed(1)}" y="${(y + fs * 0.35).toFixed(1)}"
               text-anchor="middle" fill="#0a0e1a"
-              font-size="9" font-weight="700"
+              font-size="${fs.toFixed(1)}" font-weight="700"
               font-family="DM Sans, sans-serif"
               pointer-events="none">${n.label || id}</text>
       `;
     }
 
     svg.innerHTML = html;
+  },
+
+  /* ── Hover tooltip ───────────────────────────────────────────────────────
+     A lightweight HTML tooltip anchored to the network container, showing the
+     player's name, total passing volume and number of distinct links. */
+  _tip(ev) {
+    const cont = document.querySelector(".pass-network-container");
+    if (!cont) return;
+    let tip = cont.querySelector(".pn-tooltip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "pn-tooltip";
+      cont.appendChild(tip);
+    }
+    const c = ev.target;
+    tip.innerHTML =
+      `<div class="pn-tip-name">${c.getAttribute("data-name")}</div>` +
+      `<div class="pn-tip-row">${c.getAttribute("data-vol")} passes</div>` +
+      `<div class="pn-tip-row">${c.getAttribute("data-deg")} team-mates linked</div>`;
+    tip.style.display = "block";
+    const r = cont.getBoundingClientRect();
+    const x = ev.clientX - r.left + 14;
+    const y = ev.clientY - r.top + 14;
+    tip.style.left = Math.min(x, cont.clientWidth  - tip.offsetWidth  - 6) + "px";
+    tip.style.top  = Math.min(y, cont.clientHeight - tip.offsetHeight - 6) + "px";
+  },
+
+  _hideTip() {
+    const tip = document.querySelector(".pass-network-container .pn-tooltip");
+    if (tip) tip.style.display = "none";
   },
 };
 

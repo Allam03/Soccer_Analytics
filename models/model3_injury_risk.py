@@ -262,6 +262,7 @@ def run(conn, output_dir: str = "artifacts/model3") -> Dict[str, Any]:
     rf_auc = cross_val_score(rf_pipe, X, y, cv=cv, scoring="roc_auc")
     logger.info("RF  AUC-ROC (5-fold): %.3f +/- %.3f", rf_auc.mean(), rf_auc.std())
 
+    xgb_auc = None
     try:
         from xgboost import XGBClassifier
         scale_pos = (y == 0).sum() / max(1, (y == 1).sum())
@@ -317,7 +318,39 @@ def run(conn, output_dir: str = "artifacts/model3") -> Dict[str, Any]:
     df.to_parquet(f"{output_dir}/features.parquet", index=False)
 
     logger.info("Model 3 artifacts saved to %s", output_dir)
-    return {"lr": lr, "rf": rf, "xgb": xgb, "scaler": scaler_final}
+
+    metrics = {
+        "lr_roc_auc": float(lr_auc.mean()),
+        "lr_roc_auc_std": float(lr_auc.std()),
+        "rf_roc_auc": float(rf_auc.mean()),
+        "rf_roc_auc_std": float(rf_auc.std()),
+        "positive_rate": float(df["label"].mean()),
+        "primary": "xgb" if xgb is not None else "rf",
+    }
+    if xgb_auc is not None:
+        metrics["xgb_roc_auc"] = float(xgb_auc.mean())
+        metrics["xgb_roc_auc_std"] = float(xgb_auc.std())
+    metrics["feature_importances"] = {
+        f: float(v) for f, v in zip(FEATURES, rf.feature_importances_)
+    }
+
+    return {
+        "lr": lr, "rf": rf, "xgb": xgb, "scaler": scaler_final,
+        "_registry": {
+            "model_key": "model3_injury_risk",
+            "version": "1.0",
+            "display_name": "Injury Risk",
+            "task": "classification",
+            "algorithm": "XGBoost / RandomForest / LogisticRegression (balanced)",
+            "target": "is_injured_next_30d",
+            "features": list(FEATURES),
+            "metrics": metrics,
+            "n_train_rows": int(len(df)),
+            "artifact_path": output_dir,
+            "prediction_table": "model3_features",
+        },
+        "_predictions": {"model3_features": df},
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════

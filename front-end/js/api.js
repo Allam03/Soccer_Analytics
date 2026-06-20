@@ -16,6 +16,14 @@
 const ApiService = {
   baseUrl: "/api",
   teamId:  null,
+  season:  null,   // null/"all" = every season; otherwise a concrete season string
+
+  // Append the active season filter to a team-scoped query string.
+  _season() {
+    return this.season && this.season !== "all"
+      ? `&season=${encodeURIComponent(this.season)}`
+      : "";
+  },
 
   async request(path) {
     const url = `${this.baseUrl}${path}`;
@@ -58,43 +66,56 @@ const ApiService = {
     return this.request("/options/teams");
   },
 
-  async loadDashboard() {
-    return this.request(`/dashboard?team_id=${this.teamId}`);
+  async loadSeasons(teamId) {
+    return this.request(`/options/seasons?team_id=${teamId}`);
   },
 
   async loadPlayer() {
-    return this.request(`/player-efficiency?team_id=${this.teamId}`);
+    return this.request(`/player-efficiency?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadCohesion() {
-    return this.request(`/team-cohesion?team_id=${this.teamId}`);
+    return this.request(`/team-cohesion?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadXG() {
-    return this.request(`/xg-finishing?team_id=${this.teamId}`);
+    return this.request(`/xg-finishing?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadWinProb() {
-    return this.request(`/win-probability?team_id=${this.teamId}`);
+    return this.request(`/win-probability?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadInjury() {
-    return this.request(`/injury-risk?team_id=${this.teamId}`);
+    return this.request(`/injury-risk?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadShotMap() {
-    return this.request(`/shot-map?team_id=${this.teamId}`);
+    return this.request(`/shot-map?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadLeagueXG() {
-    return this.request(`/league-xg`);
+    // The season table is inherently per-season; pass the active season (or the
+    // endpoint's default when "all" is selected).
+    const s = this.season && this.season !== "all"
+      ? `?season=${encodeURIComponent(this.season)}` : "";
+    return this.request(`/league-xg${s}`);
   },
 
   async loadMatches() {
-    return this.request(`/matches?team_id=${this.teamId}`);
+    return this.request(`/matches?team_id=${this.teamId}${this._season()}`);
   },
 
   async loadMatchTimeline(matchId) {
     return this.request(`/match-xg-timeline?match_id=${matchId}`);
+  },
+
+  // EDA and model-registry data are team-independent (whole-dataset views).
+  async loadEDA() {
+    return this.request(`/eda`);
+  },
+
+  async loadModels() {
+    return this.request(`/models`);
   },
 };
