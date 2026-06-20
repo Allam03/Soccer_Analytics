@@ -433,9 +433,9 @@ const Charts = {
   },
 
   // ── In-game win probability (Model 5B, dynamic) ──────────────────────────
-  // 100%-stacked area of win / draw / loss over the match minutes. The series'
-  // minute-0 point is the static pre-match model's call, so the chart shows the
-  // pre-match prediction handing off to the live in-game model.
+  // Three independent lines (win / draw / loss), each its own 0–100% probability
+  // re-estimated every minute. The win line is filled so the team's live chances
+  // read at a glance; a dashed marker shows the static pre-match call at kickoff.
   initWinProbTimeline(payload) {
     const canvas = document.getElementById('winProbTimelineChart');
     if (!canvas || !payload) return;
@@ -444,29 +444,43 @@ const Charts = {
     const series = payload.series || [];
     if (!series.length) return;
     const mins = series.map(p => p.minute);
-    const line = (key, color, fillBelow) => ({
-      label: key === 'win' ? 'Win' : key === 'draw' ? 'Draw' : 'Loss',
+    const pre  = payload.prematch;  // {win,draw,loss} or null
+
+    const line = (key, label, color, fill) => ({
+      label,
       data: series.map(p => p[key]),
       borderColor: color,
-      backgroundColor: fillBelow,
-      borderWidth: 2,
-      fill: true,
-      stack: 'wp',
+      backgroundColor: fill || 'transparent',
+      borderWidth: key === 'win' ? 2.5 : 1.6,
+      fill: !!fill,
       pointRadius: 0,
       pointHoverRadius: 4,
-      tension: 0.25,
+      tension: 0.3,
     });
+
+    const datasets = [
+      line('win',  'Win',  C.accent, 'rgba(56,189,131,0.16)'),
+      line('draw', 'Draw', '#8896aa', null),
+      line('loss', 'Loss', C.red,    null),
+    ];
+
+    // Dashed pre-match reference for the win probability (flat across the match).
+    if (pre) {
+      datasets.push({
+        label: 'Pre-match win',
+        data: mins.map(() => pre.win),
+        borderColor: 'rgba(56,189,131,0.55)',
+        borderWidth: 1.2,
+        borderDash: [5, 4],
+        fill: false,
+        pointRadius: 0,
+        pointHoverRadius: 0,
+      });
+    }
 
     new Chart(canvas.getContext('2d'), {
       type: 'line',
-      data: {
-        labels: mins,
-        datasets: [
-          line('win',  C.accent, 'rgba(56,189,131,0.30)'),
-          line('draw', '#8896aa', 'rgba(136,150,170,0.22)'),
-          line('loss', C.red,    'rgba(239,68,68,0.22)'),
-        ],
-      },
+      data: { labels: mins, datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -482,8 +496,7 @@ const Charts = {
           tooltip: {
             ...tooltipDefaults,
             callbacks: {
-              title: items => items[0].label === '0'
-                ? "Pre-match (minute 0)" : `Minute ${items[0].label}`,
+              title: items => `Minute ${items[0].label}`,
               label: ctx => ` ${ctx.dataset.label}: ${Number(ctx.raw).toFixed(0)}%`,
             },
           },
@@ -491,7 +504,7 @@ const Charts = {
         scales: makeScales({
           x: { title: { display: true, text: 'Minute', color: '#4a5568', font: { size: 10 } },
                grid: { display: false } },
-          y: { min: 0, max: 100, stacked: true,
+          y: { min: 0, max: 100,
                ticks: { color: '#4a5568', font: { size: 10 }, callback: v => `${v}%` },
                title: { display: true, text: 'Win probability', color: '#4a5568', font: { size: 10 } } },
         }),

@@ -1489,10 +1489,10 @@ def win_probability_timeline(match_id: int, team_id: int) -> dict[str, Any]:
                 "goal_diff": int(r.get("goal_diff_so_far", 0)),
             })
 
-        # Seed a minute-0 point from the static pre-match model for this match.
+        # The static pre-match call for this exact match — returned separately
+        # (not spliced into the in-game series) so the chart can show it as a
+        # reference without an artificial "kickoff dip" between two models.
         pre_point = _m5_prematch_point(match_id, team_id)
-        if pre_point:
-            series.insert(0, {"minute": 0, **pre_point, "goal_diff": 0})
     except Exception as exc:
         logger.warning("/api/win-probability-timeline match=%d team=%d error: %s",
                        match_id, team_id, exc)
@@ -1501,6 +1501,7 @@ def win_probability_timeline(match_id: int, team_id: int) -> dict[str, Any]:
 
     out: dict[str, Any] = {"series": series, "match_id": match_id,
                            "team_id": team_id, "source": "artifact",
+                           "prematch": pre_point,
                            "model": _m5_model_block()}
     if meta:
         is_home = int(meta["home_team_id"]) == team_id
@@ -1518,7 +1519,7 @@ def win_probability_timeline(match_id: int, team_id: int) -> dict[str, Any]:
 
 def _m5_prematch_point(match_id: int, team_id: int) -> dict[str, float] | None:
     """The static (v2) pre-match win/draw/loss for one specific (match, team),
-    used to seed minute 0 of the in-game curve."""
+    shown as the in-game chart's pre-kickoff reference."""
     m5 = _A.get("m5", {})
     gbc, scaler, feats, df = (
         m5.get("gbc_pre_v2"), m5.get("scaler_pre_v2"),

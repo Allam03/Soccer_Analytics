@@ -859,11 +859,14 @@ async function _loadMatchTimeline(matchId) {
       const last = wp.series[wp.series.length - 1];
       const score = (wp.home_score != null)
         ? `${wp.home_name} ${wp.home_score}–${wp.away_score} ${wp.away_name}` : "";
+      const preTxt = wp.prematch
+        ? `Pre-match, the static model gave <strong>${wp.team_name || getSelectedTeamName()}</strong> a ${wp.prematch.win}% win chance (dashed line). `
+        : "";
       wpSum.innerHTML =
-        `<strong>${wp.team_name || getSelectedTeamName()}</strong> win probability over the match` +
+        preTxt +
+        `The live model then re-reads the match every minute` +
         (score ? ` · final: ${score}` : "") +
-        `. By full time the live model reads <strong>${last.win}% win / ${last.draw}% draw / ${last.loss}% loss</strong>. ` +
-        `Minute 0 is the static pre-match call; every later point also sees the live score.`;
+        `, ending at <strong>${last.win}% win / ${last.draw}% draw / ${last.loss}% loss</strong>.`;
     } else if (wpSum) {
       wpSum.textContent = "No in-game snapshots available for this match.";
     }
